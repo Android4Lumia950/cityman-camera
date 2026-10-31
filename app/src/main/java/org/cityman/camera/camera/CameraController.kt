@@ -71,6 +71,11 @@ data class CameraState(
     val processing: Boolean = false,
     /** The phone is resting: multi-frame photos use the long night exposures. */
     val still: Boolean = false,
+    val showHistogram: Boolean = false,
+    val zebra: Boolean = false,
+    val peaking: Boolean = false,
+    /** Clockwise rotation from the sensor image to the viewfinder, for overlays. */
+    val previewRotation: Int = 0,
     val controls: ManualControls = ManualControls(),
     val live: LiveValues = LiveValues(),
     val previewSize: Size? = null,
@@ -110,12 +115,19 @@ class CameraController(private val context: Context) {
         load(MediaActionSound.STOP_VIDEO_RECORDING)
     }
 
+    private val _analysis = MutableStateFlow<Analysis?>(null)
+    /** Latest viewfinder analysis (histogram, clipping, zebra/peaking overlay). */
+    val analysis: StateFlow<Analysis?> = _analysis
+
     private val _state = MutableStateFlow(
         CameraState(
             saveDng = prefs.getBoolean("dng", false),
             grid = prefs.getBoolean("grid", false),
             format = runCatching { PhotoFormat.valueOf(prefs.getString("format", null) ?: "FULL") }.getOrDefault(PhotoFormat.FULL),
             multiFrame = prefs.getBoolean("mf", false),
+            showHistogram = prefs.getBoolean("histogram", false),
+            zebra = prefs.getBoolean("zebra", false),
+            peaking = prefs.getBoolean("peaking", false),
             mfFrames = prefs.getInt("mfFrames", 0),
             mfOptions = ProcessingOptions(
                 denoise = prefs.getBoolean("mfDenoise", true),
@@ -138,6 +150,10 @@ class CameraController(private val context: Context) {
     // Device orientation in degrees (OrientationEventListener convention) and display rotation.
     @Volatile var deviceOrientation: Int = OrientationEventListener.ORIENTATION_UNKNOWN
     @Volatile var displayRotationDegrees: Int = 90
+        set(value) {
+            field = value
+            caps?.let { c -> _state.update { it.copy(previewRotation = previewRotation(c)) } }
+        }
 
     // ---- main thread: viewfinder surface -------------------------------------------------
     private var holder: SurfaceHolder? = null
@@ -187,6 +203,9 @@ class CameraController(private val context: Context) {
     private var jpegReader: ImageReader? = null
     private var rawReader: ImageReader? = null
     private var video: VideoPipeline? = null
+    private var analyzer: FrameAnalyzer? = null
+    /** The HAL refused a session with the analysis stream on this camera. */
+    private var analysisRefused = false
     private var recorder: MediaRecorder? = null
     private var recordingUri: Uri? = null
     private var recordingFd: ParcelFileDescriptor? = null
@@ -241,6 +260,7 @@ class CameraController(private val context: Context) {
     fun switchCamera() = camHandler.post {
         if (cameraIds.size < 2) return@post
         closeCamera()
+        analysisRefused = false
         controls = ManualControls()
         zoom = 1f
         _state.update {
@@ -265,6 +285,13 @@ class CameraController(private val context: Context) {
         prefs.edit().putString("format", format.name).apply()
         _state.update { it.copy(format = format) }
         if (_state.value.mode == CaptureMode.PHOTO) reconfigure()
+    }
+
+    fun setAnalysisTools(histogram: Boolean, zebra: Boolean, peaking: Boolean) {
+        prefs.edit().putBoolean("histogram", histogram).putBoolean("zebra", zebra).putBoolean("peaking", peaking).apply()
+        _state.update { it.copy(showHistogram = histogram, zebra = zebra, peaking = peaking) }
+        analyzer?.zebra = zebra
+        analyzer?.peaking = peaking
     }
 
     fun setGrid(enabled: Boolean) {
@@ -441,6 +468,9 @@ class CameraController(private val context: Context) {
         device = null
         video?.release()
         video = null
+        analyzer?.release()
+        analyzer = null
+        _analysis.value = null
         waitingAf = false
         camHandler.removeCallbacks(afTimeout)
     }
@@ -509,7 +539,23 @@ class CameraController(private val context: Context) {
                 }
                 withRaw = true
             }
-        } else {
+        }
+        var withAnalysis = false
+        if (st.mode == CaptureMode.PHOTO && !analysisRefused) {
+            val preview = _state.value.previewSize
+            val asz = preview?.let { c.analysisSize(it) }
+            if (asz != null) {
+                val a = analyzer?.takeIf { it.size == asz } ?: run {
+                    analyzer?.release()
+                    FrameAnalyzer(asz) { _analysis.value = it }.also { analyzer = it }
+                }
+                a.zebra = st.zebra
+                a.peaking = st.peaking
+                outputs += OutputConfiguration(a.reader.surface)
+                withAnalysis = true
+            }
+        }
+        if (st.mode == CaptureMode.VIDEO) {
             val size = c.videoSize()
             val vp = video?.takeIf { it.size == size } ?: run {
                 video?.release()
@@ -517,7 +563,8 @@ class CameraController(private val context: Context) {
             }
             outputs += OutputConfiguration(vp.reader.surface)
         }
-        Log.i(TAG, "session gen=$gen camera=${c.id} mode=${st.mode} preview=${_state.value.previewSize} raw=$withRaw")
+        Log.i(TAG, "session gen=$gen camera=${c.id} mode=${st.mode} preview=${_state.value.previewSize} raw=$withRaw analysis=$withAnalysis")
+        _state.update { it.copy(previewRotation = previewRotation(c)) }
         val config = SessionConfiguration(
             SessionConfiguration.SESSION_REGULAR, outputs, camExecutor,
             object : CameraCaptureSession.StateCallback() {
@@ -532,9 +579,15 @@ class CameraController(private val context: Context) {
                 }
 
                 override fun onConfigureFailed(s: CameraCaptureSession) {
-                    Log.e(TAG, "session configuration failed (raw=$withRaw)")
+                    Log.e(TAG, "session configuration failed (raw=$withRaw, analysis=$withAnalysis)")
                     if (gen != configGen) return
-                    if (withRaw) {
+                    if (withAnalysis) {
+                        // Try again without the analysis stream (histogram, zebra, peaking).
+                        analysisRefused = true
+                        analyzer?.release()
+                        analyzer = null
+                        reconfigure()
+                    } else if (withRaw) {
                         _state.update { it.copy(saveDng = false, multiFrame = false) }
                         report("RAW is not available together with this photo size")
                         reconfigure()
@@ -560,6 +613,7 @@ class CameraController(private val context: Context) {
         val b = dev.createCaptureRequest(if (recording) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW)
         b.addTarget(surface)
         if (recording) video?.let { b.addTarget(it.reader.surface) }
+        if (_state.value.mode == CaptureMode.PHOTO && session != null) analyzer?.let { b.addTarget(it.reader.surface) }
         applyControls(b, still = false)
         return b
     }
@@ -954,7 +1008,7 @@ class CameraController(private val context: Context) {
 
     @Volatile private var burst: Burst? = null
 
-    private data class BurstPlan(val iso: Int, val exposureNs: Long, val gain: Float, val frames: Int)
+    private data class BurstPlan(val iso: Int, val exposureNs: Long, val gain: Float, val frames: Int, val underEv: Float = BURST_UNDER_EV.toFloat())
 
     /**
      * Exposure of the burst frames. Automatic: 0.7 EV under what auto exposure measured (to keep
@@ -978,21 +1032,34 @@ class CameraController(private val context: Context) {
             omega <= 0.0 -> BURST_LOW_LIGHT_SHUTTER_NS.toDouble()
             else -> (blurPx / (omega * focalPx) * 1e9).coerceIn(1e9 / 60, BURST_LOW_LIGHT_SHUTTER_NS.toDouble())
         }.toLong()
+        var underUsed = 0f
         val (iso, exposure, gain) = if (m.iso != null || m.exposureNs != null || isoRange == null || expRange == null) {
             val (i, e) = manualExposure(c, m)
             Triple(i, e, 1f)
         } else {
             val ev = 2.0.pow(m.evSteps * c.evStep.toDouble())
             val product = autoIso.toDouble() * autoExposureNs * ev
-            val target = product * 2.0.pow(-BURST_UNDER_EV)
+            // Under-exposure from the viewfinder: more when highlights are blown, less when not.
+            val clipped = analyzer?.latestClipped ?: -1f
+            val underEv = when {
+                clipped < 0f -> BURST_UNDER_EV
+                clipped > 0.04f -> 1.6
+                clipped > 0.01f -> 1.1
+                clipped < 0.002f -> 0.4
+                else -> BURST_UNDER_EV
+            }
+            underUsed = underEv.toFloat()
+            val target = product * 2.0.pow(-underEv)
             // Short frames keep hand shake out of each frame (merging takes care of the noise):
             // 1/30 s or what the gyroscope allows, longer only once ISO is at its maximum.
             // Manual ISO stops at the sensor's analogue maximum (342 here, the HAL clamps higher
             // values); handheld, up to 2× digital gain after the merge costs less than shake.
             // On a tripod (gyroscope still) the frames grow up to 1/2 s instead of gaining.
+            // The gyroscope only shortens frames when there is light to spare: it never pushes
+            // the digital gain past 2× (handheld frames may still grow to 1/10 s for that).
             val base = min(BURST_MAX_SHUTTER_NS, shakeLimit)
             val atMaxIso = (target / (isoRange.upper * if (tripod) 1.0 else BURST_DIGITAL_GAIN_FIRST)).toLong()
-            val cap = atMaxIso.coerceIn(base, max(base, shakeLimit))
+            val cap = atMaxIso.coerceIn(base, if (tripod) NIGHT_SHUTTER_NS else max(base, BURST_LOW_LIGHT_SHUTTER_NS))
             val exp = (target / isoRange.lower).toLong().coerceIn(expRange.lower, min(cap, expRange.upper))
             val i = (target / exp).roundToInt().coerceIn(isoRange.lower, isoRange.upper)
             Triple(i, exp, (product / (i.toDouble() * exp)).toFloat().coerceIn(1f, 64f))
@@ -1004,8 +1071,8 @@ class CameraController(private val context: Context) {
             gain >= 1.8f || (isoRange != null && iso >= isoRange.upper * 0.9) -> 8
             else -> 6
         }.coerceIn(2, MAX_BURST)
-        Log.i(TAG, "plan: gyro ${String.format(java.util.Locale.US, "%.4f", omega)} rad/s${if (tripod) " (still)" else ""}, shake limit ${shakeLimit / 1000} µs")
-        return BurstPlan(iso, exposure, gain, frames)
+        Log.i(TAG, "plan: gyro ${String.format(java.util.Locale.US, "%.4f", omega)} rad/s${if (tripod) " (still)" else ""}, shake limit ${shakeLimit / 1000} µs, clipped ${analyzer?.latestClipped}")
+        return BurstPlan(iso, exposure, gain, frames, underUsed)
     }
 
     // ---- gyroscope: how much the hand shakes, for the burst exposure ----------------------
@@ -1024,8 +1091,8 @@ class CameraController(private val context: Context) {
     private val gyroListener = object : android.hardware.SensorEventListener {
         override fun onSensorChanged(e: android.hardware.SensorEvent) {
             val w = kotlin.math.sqrt((e.values[0] * e.values[0] + e.values[1] * e.values[1] + e.values[2] * e.values[2]).toDouble())
-            // About 0.3 s of smoothing at 50 Hz, but follow a sudden movement at once.
-            gyroRate = if (gyroSamples == 0) w else max(w, gyroRate * 0.93 + w * 0.07)
+            // Mean over about 0.4 s at 50 Hz: the hand's tremor, not the peak of the tap.
+            gyroRate = if (gyroSamples == 0) w else gyroRate * 0.95 + w * 0.05
             gyroSamples++
             if (w > gyroMaxSeen) gyroMaxSeen = w
             val now = SystemClock.elapsedRealtime()
@@ -1079,6 +1146,7 @@ class CameraController(private val context: Context) {
             width = raw.width, height = raw.height, chanAt = cfaChannels(c), black = black, white = white,
             gain = plan.gain, rotation = current.orientation, iso = plan.iso, options = _state.value.mfOptions,
             frames = plan.frames,
+            underEv = plan.underEv,
             crop = if (raw.width == c.activeArray.width() && raw.height == c.activeArray.height()) 0 else 16,
         )
         val info = ShotInfo(

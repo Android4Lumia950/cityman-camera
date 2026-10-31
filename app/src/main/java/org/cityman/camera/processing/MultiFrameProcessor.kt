@@ -43,6 +43,8 @@ data class BurstSetup(
     val options: ProcessingOptions,
     /** Frames in the burst: the sharpest of the first three becomes the reference. */
     val frames: Int = 8,
+    /** How far the burst was under-exposed (EV): high in backlit scenes, which get more tone compression. */
+    val underEv: Float = 0.7f,
 )
 
 /**
@@ -339,8 +341,10 @@ class MultiFrameProcessor {
         // Slightly below the auto exposure brightness: deeper shadows, like the camera's own JPEG.
         var gainUse = s.gain * 0.85f
         val highlight = stats.second // log2 of a high percentile of block peaks
-        val maxGain = 2f.pow(1.6f - highlight)
-        if (gainUse > maxGain) gainUse = max(maxGain, s.gain / 2f)
+        // Local tone mapping and the shoulder take care of bright areas; only pull the global
+        // gain down a little when they would clip very hard.
+        val maxGain = 2f.pow(2.5f - highlight)
+        if (gainUse > maxGain) gainUse = max(maxGain, gainUse * 0.75f)
 
         // Full-resolution finish into an RGBA8 image, then sharpen and rotate.
         val tone = Tex(s.width, s.height, GLES31.GL_RGBA8)
@@ -355,8 +359,9 @@ class MultiFrameProcessor {
             p.setMat3("uCcm", ccmRows)
             p.set("uGain", gainUse)
             p.set("uChroma", if (o.chromaDenoise) chromaStrength(s.iso, s.gain) else 0f)
-            p.set("uCompress", if (o.vivid) 0.66f else 0.72f)
-            p.set("uLift", if (o.vivid) 0.9f else 0.94f)
+            val hdr = ((s.underEv - 0.7f) / 0.9f).coerceIn(0f, 1f)
+            p.set("uCompress", (if (o.vivid) 0.66f else 0.72f) - 0.1f * hdr)
+            p.set("uLift", (if (o.vivid) 0.9f else 0.94f) - 0.07f * hdr)
             p.set("uAnchor", -2.5f)
             p.set("uBlack", if (o.vivid) 0.016f else 0.012f)
             p.set("uContrast", if (o.vivid) 0.45f else 0.35f)

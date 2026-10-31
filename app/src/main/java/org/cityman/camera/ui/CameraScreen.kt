@@ -64,6 +64,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
@@ -232,6 +234,7 @@ fun CameraScreen(
                 onMultiFrame = { controller.setMultiFrame(it) },
                 onFrames = { controller.setMultiFrameFrames(it) },
                 onOptions = { controller.setMultiFrameOptions(it) },
+                onTools = { h, z, p -> controller.setAnalysisTools(h, z, p) },
             )
         }
 
@@ -285,6 +288,7 @@ private fun Viewfinder(
             factory = { ctx -> SurfaceView(ctx).apply { holder.addCallback(controller.surfaceCallback) } },
             modifier = Modifier.fillMaxSize(),
         )
+        AnalysisOverlay(controller, state)
         if (showGrid) {
             Canvas(Modifier.fillMaxSize()) {
                 val c = Color.White.copy(alpha = 0.35f)
@@ -307,6 +311,53 @@ private fun Viewfinder(
             }
         }
         if (flash.value > 0f) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = flash.value)))
+    }
+}
+
+/** Zebra / focus peaking marks over the viewfinder, and the histogram. */
+@Composable
+private fun AnalysisOverlay(controller: CameraController, state: CameraState) {
+    if (state.mode != CaptureMode.PHOTO) return
+    if (!state.showHistogram && !state.zebra && !state.peaking) return
+    val analysis by controller.analysis.collectAsStateWithLifecycle()
+    val a = analysis ?: return
+    val bmp = a.overlay
+    if (bmp != null && (state.zebra || state.peaking)) {
+        val front = state.caps?.front == true
+        val rot = state.previewRotation
+        Canvas(Modifier.fillMaxSize()) {
+            drawIntoCanvas { canvas ->
+                val m = android.graphics.Matrix()
+                m.postTranslate(-bmp.width / 2f, -bmp.height / 2f)
+                m.postRotate(rot.toFloat())
+                val rw = if (rot % 180 == 0) bmp.width else bmp.height
+                val rh = if (rot % 180 == 0) bmp.height else bmp.width
+                m.postScale((if (front) -1f else 1f) * size.width / rw, size.height / rh)
+                m.postTranslate(size.width / 2f, size.height / 2f)
+                canvas.nativeCanvas.drawBitmap(bmp, m, null)
+            }
+        }
+    }
+    if (state.showHistogram) {
+        Box(Modifier.fillMaxSize().padding(10.dp), contentAlignment = Alignment.TopEnd) {
+            Canvas(
+                Modifier
+                    .size(width = 128.dp, height = 56.dp)
+                    .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
+                    .padding(4.dp),
+            ) {
+                val n = a.histogram.size
+                val bw = size.width / n
+                for (i in 0 until n) {
+                    val h = a.histogram[i] * size.height
+                    drawRect(
+                        if (i >= n - 2 && a.clipped > 0.01f) RecordRed else Color.White.copy(alpha = 0.85f),
+                        topLeft = Offset(i * bw, size.height - h),
+                        size = androidx.compose.ui.geometry.Size(bw * 0.9f, h),
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -537,6 +588,7 @@ private fun SettingsPanel(
     onMultiFrame: (Boolean) -> Unit,
     onFrames: (Int) -> Unit,
     onOptions: (ProcessingOptions) -> Unit,
+    onTools: (Boolean, Boolean, Boolean) -> Unit,
 ) {
     val caps = state.caps
     Column(
@@ -548,6 +600,11 @@ private fun SettingsPanel(
             .padding(vertical = 6.dp),
     ) {
         ToggleRow(stringResource(R.string.settings_grid), state.grid) { onGrid(!state.grid) }
+        if (state.mode == CaptureMode.PHOTO) {
+            ToggleRow(stringResource(R.string.settings_histogram), state.showHistogram) { onTools(!state.showHistogram, state.zebra, state.peaking) }
+            ToggleRow(stringResource(R.string.settings_zebra), state.zebra) { onTools(state.showHistogram, !state.zebra, state.peaking) }
+            ToggleRow(stringResource(R.string.settings_peaking), state.peaking) { onTools(state.showHistogram, state.zebra, !state.peaking) }
+        }
         if (caps?.rawSize != null && state.mode == CaptureMode.PHOTO) {
             ToggleRow(stringResource(R.string.settings_mf), state.multiFrame) { onMultiFrame(!state.multiFrame) }
             if (state.multiFrame) {

@@ -18,4 +18,7 @@
     <string name="settings_mf_denoise">Noise reduction</string>
     <string name="settings_mf_vivid">Vivid colours</string>
     <string name="badge_still">NIGHT · STILL</string>
+    <string name="settings_histogram">Histogram</string>
+    <string name="settings_zebra">Zebra (blown highlights)</string>
+    <string name="settings_peaking">Focus peaking</string>
 </resources>

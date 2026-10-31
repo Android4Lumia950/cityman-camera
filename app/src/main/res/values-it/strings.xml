@@ -17,4 +17,7 @@
     <string name="settings_mf_denoise">Riduzione rumore</string>
     <string name="settings_mf_vivid">Colori vivaci</string>
     <string name="badge_still">NOTTE · FERMO</string>
+    <string name="settings_histogram">Istogramma</string>
+    <string name="settings_zebra">Zebra (alte luci bruciate)</string>
+    <string name="settings_peaking">Focus peaking</string>
 </resources>

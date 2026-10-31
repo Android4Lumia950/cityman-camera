@@ -36,6 +36,14 @@ class CameraCaps(val id: String, val chars: CameraCharacteristics) {
     private val jpegSizes: List<Size> = map.getOutputSizes(ImageFormat.JPEG)?.toList() ?: emptyList()
     private val previewSizes: List<Size> = map.getOutputSizes(SurfaceHolder::class.java)?.toList() ?: emptyList()
     private val videoSizes: List<Size> = map.getOutputSizes(MediaRecorder::class.java)?.toList() ?: emptyList()
+    private val yuvSizes: List<Size> = map.getOutputSizes(ImageFormat.YUV_420_888)?.toList() ?: emptyList()
+
+    /** Small YUV size with the viewfinder's shape, for frame analysis. */
+    fun analysisSize(preview: Size): Size? {
+        val ratio = preview.width.toFloat() / preview.height
+        return yuvSizes.filter { it.width in 320..640 }
+            .minWithOrNull(compareBy<Size> { (abs(it.width.toFloat() / it.height - ratio) * 50).toInt() }.thenByDescending { it.area() })
+    }
 
     val rawSize: Size? = if (CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW in capabilities) {
         map.getOutputSizes(ImageFormat.RAW_SENSOR)?.maxByOrNull { it.area() }
