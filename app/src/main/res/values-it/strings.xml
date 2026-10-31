@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="badge_locked">AF·AE BLOCCATI</string>
+    <string name="settings_grid">Griglia</string>
+    <string name="settings_dng">Salva anche RAW (DNG)</string>
+    <string name="settings_format">FORMATO FOTO</string>
+    <string name="format_full">Intero</string>
+    <string name="permission_needed">Arco ha bisogno della fotocamera per scattare. Il microfono serve per l\'audio dei video.</string>
+    <string name="permission_grant">Consenti</string>
+    <string name="no_viewer">Nessuna app può aprire questo file</string>
+</resources>

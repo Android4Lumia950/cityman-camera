@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Arco</string>
+    <string name="badge_locked">AF·AE LOCK</string>
+    <string name="settings_grid">Grid</string>
+    <string name="settings_dng">Also save RAW (DNG)</string>
+    <string name="settings_format">PHOTO SIZE</string>
+    <string name="format_full">Full</string>
+    <string name="permission_needed">Arco needs the camera to take photos. The microphone is used for video sound.</string>
+    <string name="permission_grant">Allow</string>
+    <string name="no_viewer">No app can open this file</string>
+</resources>

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- arc dial: three quarters of a ring around a lens dot -->
+    <path android:strokeColor="#FFFFB300" android:strokeWidth="5" android:strokeLineCap="round"
+        android:pathData="M54,30 A24,24 0 1,0 78,54" />
+    <path android:strokeColor="#66FFFFFF" android:strokeWidth="5" android:strokeLineCap="round"
+        android:pathData="M78,54 A24,24 0 0,0 54,30" />
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M54,54m-9,0a9,9 0 1,1 18,0a9,9 0 1,1 -18,0" />
+    <path android:fillColor="#FFFFB300"
+        android:pathData="M78,54m-4,0a4,4 0 1,1 8,0a4,4 0 1,1 -8,0" />
+</vector>
