@@ -9,17 +9,18 @@ nel README (o in un report), non quando il codice è su GitHub.
 
 ---
 
-## Dove siamo (31/10 sera)
+## Dove siamo (31/10, fine giornata)
 
 | Area | Stato | Note |
 |---|---|---|
-| Anteprima, rotazione | funziona, verticale e orizzontale | provato dall'utente |
-| Quadranti WB/fuoco/ISO/tempo/EV | funzionano dal vivo | ISO manuale limitata a 342 dal HAL |
-| JPEG + DNG | funzionano | DNG anche del RAW fuso |
-| Video | funziona su entrambe le camere | via YUV → GL (il gralloc della ROM rifiuta camera→encoder); posteriore 15–20 fps |
-| Multi-frame (MF) | funziona, opzionale, anche frontale | riferimento più nitido, giroscopio, notte da fermo, sotto-esposizione adattiva |
-| Strumenti | istogramma, zebra, peaking, autoscatto, suono | tutti disattivabili |
-| Pubblicazione | GitHub pubblico, GPL-3.0 | release R8 pronta, manca il keystore |
+| Anteprima, rotazione, quadranti | funzionano | ISO manuale limitata a 342 dal HAL |
+| JPEG + DNG | funzionano | anche il DNG del RAW fuso |
+| Video | funziona su entrambe le camere | YUV → GL; blocco AE, time-lapse; stabilizzazione sperimentale non provata in movimento |
+| Multi-frame | funziona, opzionale | riferimento nitido, giroscopio + accelerometro, notte da fermo, zoom, JPEG in ~0,2 s |
+| Bracketing controluce, tone mapping a due scale | compilati | **da provare sul telefono** |
+| Avvio da schermata di blocco | funziona | va scelta Arco come predefinita una volta |
+| Impostazioni | pannello rapido + schermata completa, accento Material You | |
+| Test automatici | 7 test JVM | `./gradlew testDebugUnitTest` |
 
 ## Fase 1 — Consolidamento
 
@@ -45,12 +46,13 @@ In ordine di resa attesa:
    del tasto), misurato con l'energia del gradiente sul livello grigio.
 2. ✅ **Esposizione guidata dal giroscopio**: con mano ferma tempi più lunghi e meno guadagno
    digitale, con mano mossa tempi più corti e più fotogrammi.
-3. ½ **Scene in controluce**: fatta la sotto-esposizione adattiva dall'anteprima (0,4–1,6 EV)
-   con tone mapping più forte; da fare il bracketing (fotogrammi corti per le alte luci, lunghi per le ombre)
+3. ✅ (da provare) **Scene in controluce**: sotto-esposizione adattiva dall'anteprima e 2
+   fotogrammi a −2 EV in coda al burst, usati solo dove il riferimento è saturo (fotogrammi corti per le alte luci, lunghi per le ombre)
    fuso con exposure fusion, al posto della sola sotto-esposizione fissa di 0,7 EV.
-4. **Tone mapping**: sostituire base/dettaglio con una piramide laplaciana locale (meno aloni,
+4. ½ **Tone mapping**: fatte due scale (fine vicino ai bordi, per meno aloni); da fare una vera
+   piramide laplaciana locale (meno aloni,
    più profondità controllabile); un'opzione "naturale / vivace".
-5. **Colore**: confronto sistematico con il JPEG del HAL (calore, pelle, verdi); profilo
+5. **Colore** (da fare con luce del giorno e scene ferme): confronto sistematico con il JPEG del HAL (calore, pelle, verdi); profilo
    colore proprio se serve; verifica della mappa di vignettatura sul bordo.
 6. **Fusione nel dominio delle frequenze** (Wiener per tile, come HDR+) o kernel robusti
    alla Wronski, per ridurre ancora rumore e sdoppiamenti nelle zone in movimento.
@@ -68,11 +70,11 @@ In ordine di resa attesa:
 Oggi (6 fotogrammi): circa 2 s di fusione sovrapposta alla cattura, 1 s di rifinitura GPU,
 0,3 s di lettura, 0,8–1,4 s di codifica JPEG in background.
 
-- **Zero shutter lag**: buffer circolare di 2–3 RAW prima dello scatto (≈ 40 MB ciascuno),
-  così il fotogramma di riferimento è quello del momento della pressione.
-- **Codifica JPEG più rapida**: libjpeg-turbo via NDK su più core (strisce con restart
-  marker), oppure l'encoder hardware tramite il reprocessing YUV del HAL (limite 4160×3120 da
-  valutare).
+- **Zero shutter lag** (studiato, non fatto): il RAW nelle richieste continue funziona senza
+  errori (prova del 31/10, di sera l'anteprima va comunque a 9–12 fps); manca una fusione che
+  normalizzi fotogrammi con esposizioni diverse (anteprima contro piano del burst).
+- ✅ **Codifica JPEG più rapida**: NV21 dalla GPU, 4 strisce in parallelo con l'encoder YUV di
+  sistema unite con i restart marker: da 1,5 s a circa 0,2 s.
 - Shader di fusione: evitare gli array locali (spill dei registri sull'Adreno 430), calcoli
   in fp16 dove basta, meno passaggi nella rifinitura.
 - ✅ Controllo termico: con poco margine (`getThermalHeadroom`) il burst scende a 4 fotogrammi.
@@ -86,9 +88,13 @@ Oggi (6 fotogrammi): circa 2 s di fusione sovrapposta alla cattura, 1 s di rifin
 ## Fase 4 — Funzioni dell'app
 
 - ✅ DNG anche in modalità MF: il RAW fuso.
+- ✅ Zoom: tasti 1×/2×/4× sopra lo scatto; il multi-frame ritaglia e raddoppia (bicubico). Da
+  fare: vera super-risoluzione multi-fotogramma (kernel alla Wronski).
+- ✅ Avvio dalla schermata di blocco, camera e modalità ricordate, livella.
+- ✅ Impostazioni a schermo intero con sezioni scorrevoli, pannello rapido, accento Material You.
 - ✅ Istogramma, focus peaking, zebra. Da fare: livella.
-- Quadranti nel video: i controlli si applicano già anche al video (da verificare a fondo);
-  da fare il blocco esposizione.
+- ✅ Quadranti nel video verificati (ISO e tempo manuali applicati); ✅ blocco AE/AWB;
+  ✅ time-lapse; stabilizzazione elettronica sperimentale (da provare in movimento).
 - ✅ Autoscatto e suono disattivabile. Da fare: scatto a raffica, posizione nell'EXIF.
 - Stabilizzazione video elettronica con il giroscopio.
 - Animazioni dei quadranti e aspetto rifiniti; icona e schermata impostazioni definitive.

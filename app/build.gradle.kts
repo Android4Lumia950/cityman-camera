@@ -57,6 +57,11 @@ android {
         compose = true
         buildConfig = true
     }
+
+    // Plain JVM tests: Android framework calls return defaults instead of throwing.
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {

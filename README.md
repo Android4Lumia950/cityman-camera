@@ -9,7 +9,7 @@ fonts or assets.
 Package `org.cityman.camera`, minSdk 33, targetSdk 36 (compileSdk 37.2, which the AndroidX
 libraries in use require).
 
-## What works (phase 1)
+## What works
 
 - Full-screen viewfinder, portrait and landscape (follows the system auto-rotate setting; with
   rotation locked, the icons turn instead).
@@ -22,8 +22,20 @@ libraries in use require).
   the camera writes and the encoder reads directly (`usage 0x30023`, BAD_VALUE), so the usual
   recorder surface in the capture session records no frames. Rear video runs at 15–20 fps (the
   sensor's single mode tops out at 20 fps).
-- Viewfinder tools, each optional: histogram, zebra on blown highlights, focus peaking.
+- Video extras: AE badge to lock exposure and white balance (photo too), time-lapse (5×, 10×,
+  30×, no sound), experimental gyroscope stabilisation (90 % crop moved and rotated against the
+  shake; off by default, not yet tried while moving).
+- Viewfinder tools, each optional: histogram, zebra on blown highlights, focus peaking, level.
+  They only show or hide the measurements: the viewfinder analysis that sets the multi-frame
+  exposure always runs (paused while a photo is taken).
 - Self-timer (3 or 10 s, a second press cancels), shutter sound on/off.
+- Zoom buttons (1× · 2× · 4×) above the shutter (beside it in landscape), plus pinch.
+- Lock-screen launch: Arco handles the secure still-camera intent (power key double press, camera
+  key while locked), shows over the keyguard and hides earlier photos; choose Arco once as the
+  default camera with "Always". The last camera and mode are restored at launch.
+- Settings: a quick panel by the cog button (multi-frame, self-timer, grid, DNG; time-lapse and
+  stabilisation in video) and a full-screen page with sliding sections (photo, video,
+  processing, general). The accent colour follows Android's dynamic (wallpaper) colour, or amber.
 - Manual controls on arc dials (tap a control chip to open its dial, drag along the ring, the
   automatic position is at the start of the ring; long-press a chip to put it back to auto):
   - **WB**: auto or 2400–8000 K. The Kelvin value becomes white balance gains through the
@@ -39,7 +51,8 @@ libraries in use require).
 - Tap the viewfinder to focus and meter on a point (AF·AE lock); long-press it to unlock.
   Pinch to zoom (crop, up to 4×).
 - Hardware camera key: half press focuses, full press shoots. Volume keys also shoot.
-- Gallery thumbnail of the last photo or video, opens it in the system viewer.
+- Gallery thumbnail of the last photo or video: opens the gallery in review mode, so the camera
+  album can be swiped through; the gallery app can be chosen in the settings.
 - Release builds use R8 (1.7 MB APK) and are signed from `keystore.properties` (storeFile,
   storePassword, keyAlias, keyPassword; not in git) when present.
 
@@ -101,22 +114,35 @@ for example a DNG shot at ISO 200:
 adb shell am broadcast -a org.cityman.camera.DEBUG --ez dng true --ei iso 200 --ez shoot true
 ```
 
-Extras: `dng`, `iso` (0 = auto), `shutter_us`, `wb` (Kelvin, 0 = auto), `focus` (diopters,
-−1 = auto), `ev` (steps), `reset`, `mode` (`photo`/`video`), `shoot`. See `DebugCommands.kt`.
+Extras: `dng`, `mf`, `frames`, `iso` (0 = auto), `shutter_us`, `wb` (Kelvin, 0 = auto),
+`focus` (diopters, −1 = auto), `ev` (steps), `reset`, `mode` (`photo`/`video`), `zoom`,
+`timelapse`, `stabilise`, `tools` (`h`/`z`/`p`), `zsl` (RAW in every viewfinder frame, for the
+zero shutter lag study), `switch`, `shoot`. See `DebugCommands.kt`.
+
+Unit tests (dial labels, Planckian locus, noise model fit) run on the host:
+
+```bash
+./gradlew testDebugUnitTest
+```
 
 ## Code map
 
 - `camera/CameraController.kt` — Camera2 session, viewfinder (SurfaceView), still/RAW capture,
-  video recording with a persistent input surface, manual controls, tap metering, zoom.
+  burst planning, manual controls, tap metering, zoom, gyroscope/accelerometer, settings.
+- `camera/VideoPipeline.kt` — video frames YUV → GL → recorder, time-lapse, stabilisation.
+- `camera/FrameAnalyzer.kt` — viewfinder analysis: histogram, clipping, zebra/peaking overlay.
+- `processing/` — the multi-frame pipeline (`MultiFrameProcessor`, `Shaders`, `Gl`) and the
+  parallel JPEG encoder (`ParallelJpeg`).
 - `camera/CameraCaps.kt` — what each camera supports, stream sizes, frame-rate ranges.
 - `camera/ColorCalibration.kt` — Kelvin → white balance gains and colour transform.
 - `camera/MediaStoreWriter.kt` — saving to `DCIM/Camera` through MediaStore.
 - `ui/Dials.kt` — dial stops, labels and how they map to the controls.
 - `ui/ArcDial.kt` — the half-ring dial (Compose Canvas) and its drag handling.
-- `ui/CameraScreen.kt` — layout for both orientations, chips, shutter bar, settings.
+- `ui/CameraScreen.kt` — layout for both orientations, chips, shutter bar, quick panel, overlays.
+- `ui/SettingsScreen.kt` — the full-screen settings page.
 - `ui/Glyphs.kt` — the app's line icons.
 
-## Multi-frame processing (phase 2)
+## Multi-frame processing
 
 Optional (settings, or the **MF** badge at the top left). When it is on, the shutter takes a burst
 of RAW frames and merges them on the GPU (OpenGL ES 3.1 compute shaders, `processing/`) into a
@@ -130,15 +156,19 @@ of RAW frames and merges them on the GPU (OpenGL ES 3.1 compute shaders, `proces
    night burst: up to 12 frames of up to 1/2 s (badge "NIGHT · STILL"). Fewer frames when the
    thermal headroom runs out. The HAL clamps manual ISO at 342 on the rear camera (auto exposure reaches ~1800 with
    ISP digital gain), so whatever is missing becomes digital gain after the merge, where the
-   noise is lower. 6 frames, 8 in low light (or 4/6/8 from the settings). With
-   manual ISO or shutter set, the burst uses those values.
+   noise is lower. 6 frames, 8 in low light (or 4/6/8/12 from the settings). With
+   manual ISO or shutter set, the burst uses those values. Still detection uses the gyroscope,
+   and the accelerometer's averaged jitter while the gyroscope has not moved yet (this phone's
+   gyroscope reports exact zeros at rest). Backlit scenes (more than 2 % blown in the
+   viewfinder) add two highlight frames 2 EV shorter at the end of the burst.
 2. **Merge**, frame by frame as they arrive (memory stays constant): black level, hot and dead
    pixel correction, Bayer 2×2 blocks packed into one texel; the sharpest of the first three
    frames (Laplacian energy) is the reference; grey pyramid (½, ¼, ¼); coarse-to-fine tile alignment (tiles
    16/8 px, L1 at the finest level, L2 above), with a sub-pixel refinement at the finest level
    (parabola through the costs) and bilinear sampling of each colour plane; per 2×2 block, choice between the tile's offset and
    the two nearest tiles' offsets, and a robustness weight from the local difference against the
-   noise expected at that brightness; weighted accumulation against the first frame.
+   noise expected at that brightness; weighted accumulation against the reference. Highlight
+   frames are scaled to the reference exposure and only merged where the reference is near white.
 3. **Noise model**: measured on every burst from the first aligned pair (median absolute
    difference per brightness bin, fit of variance = a·x + b), since the HAL reports no noise
    profile.
@@ -146,18 +176,22 @@ of RAW frames and merges them on the GPU (OpenGL ES 3.1 compute shaders, `proces
    matrix of the HAL's auto white balance, highlight clipping to a common level (no magenta
    highlights), bilateral spatial noise reduction guided by the noise model and the number of
    merged frames, Malvar-He-Cutler demosaic, colour noise reduction (full-resolution luminance
-   with blurred chroma), local tone mapping (log-luminance base layer, highlights compressed more
-   than shadows are lifted), black point, highlight shoulder, saturation, sRGB, S curve, luma
-   unsharp mask, rotation to upright.
+   with blurred chroma, added as a luminance difference), local tone mapping (fine and coarse
+   log-luminance base layers, the fine one near strong edges; highlights compressed more than
+   shadows are lifted, more so in backlit scenes), black point, highlight shoulder, saturation,
+   sRGB, S curve, zoom crop (Catmull-Rom ×2 from 1.5×), luma unsharp mask, rotation to upright,
+   conversion to NV21 on the GPU.
 
 Every finishing step can be turned off in the settings: noise reduction, local tone mapping,
 colour noise reduction, sharpening; "vivid colours" switches to a stronger look. With DNG on,
 the merged RAW is saved too (`IMG_…_MF.dng`, black level and white level of the sensor,
 reference frame metadata). The JPEG carries EXIF (camera, ISO, shutter, aperture, frames).
 
-Timing on the phone (31/10/2026, 6 frames): about 0.3 s per frame for upload, alignment and
-merge (overlapping the capture), 1 s of GPU finishing, 0.3 s readback; the JPEG is encoded in the
-background (0.8–1.4 s) and the shutter is free again before that. With `PROFILE = true` in
+Timing on the phone (31/10/2026, 8 frames): about 0.3 s per frame for upload, alignment and
+merge (overlapping the capture), about 1 s of GPU finishing, 0.25 s readback; the JPEG is
+encoded in the background in about 0.2 s: four strips in parallel by the system YUV encoder
+(standard Huffman tables, so they can be joined with restart markers). The shutter is free
+again as soon as the GPU is done. With `PROFILE = true` in
 `MultiFrameProcessor.kt` the log (`adb logcat -s ArcoMerge`) shows each stage.
 
 Not done yet: see [ROADMAP.md](ROADMAP.md).
