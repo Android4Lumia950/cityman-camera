@@ -119,6 +119,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (BuildConfig.DEBUG) DebugCommands.apply(intent, controller)
+    }
+
     override fun onResume() {
         super.onResume()
         hideSystemBars()

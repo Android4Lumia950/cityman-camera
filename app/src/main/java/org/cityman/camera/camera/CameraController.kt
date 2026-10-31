@@ -243,8 +243,8 @@ class CameraController(private val context: Context) {
     }
 
     fun setControls(c: ManualControls) = camHandler.post {
-        // Entering a manual value starts from what auto exposure is doing right now.
         controls = c
+        Log.i(TAG, "controls $c")
         if (c.focusDiopters != null) {
             focusRegion = null
             _state.update { it.copy(focusPoint = if (meterRegion != null) it.focusPoint else null) }
