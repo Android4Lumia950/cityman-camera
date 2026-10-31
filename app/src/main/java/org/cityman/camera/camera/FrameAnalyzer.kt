@@ -30,6 +30,7 @@ class FrameAnalyzer(val size: Size, private val sink: (Analysis) -> Unit) {
 
     /** Skip frames while a photo is captured and processed, to leave the CPU to that. */
     @Volatile var paused = false
+    @Volatile var peakingColor: Int = 0xFFFFB300.toInt()
     @Volatile var zebra = false
     @Volatile var peaking = false
     @Volatile var latestClipped = -1f
@@ -94,7 +95,7 @@ class FrameAnalyzer(val size: Size, private val sink: (Analysis) -> Unit) {
         var overlay: Bitmap? = null
         if (zebra || peaking) {
             // Half resolution: each overlay pixel looks at a 2×2 block.
-            val accent = 0xFFFFB300.toInt()
+            val accent = peakingColor
             for (oy in 0 until oh) {
                 for (ox in 0 until ow) {
                     val x = ox * 2

@@ -3,6 +3,9 @@ package org.cityman.camera.ui
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -17,7 +20,11 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
-val Accent = Color(0xFFFFB300)
+/** Amber, used when the system accent colour is turned off or not available. */
+val Amber = Color(0xFFFFB300)
+
+/** Accent colour of the whole UI: Android's dynamic accent, or [Amber]. */
+var Accent by mutableStateOf(Amber)
 val RecordRed = Color(0xFFFF3B30)
 
 enum class Glyph { SWITCH, VIDEO, PHOTO, SETTINGS, GRID }
@@ -94,19 +101,21 @@ private fun DrawScope.drawPhoto(color: Color, stroke: Stroke, s: Float) {
     drawCircle(color, radius = s * 0.15f, center = Offset(s * 0.5f, s * 0.55f), style = stroke)
 }
 
-/** A small arc dial with a pointer: the settings button. */
+/** A cog: eight square teeth around a ring with a hole, the settings button. */
 private fun DrawScope.drawSettings(color: Color, stroke: Stroke, s: Float) {
-    val r = s * 0.38f
-    drawArc(color, 140f, 260f, false, Offset(center.x - r, center.y - r), Size(r * 2, r * 2), style = stroke)
-    for (a in listOf(170f, 230f, 290f, 350f)) {
-        rotate(a, center) {
-            drawLine(color, Offset(center.x + r * 0.62f, center.y), Offset(center.x + r * 0.82f, center.y), stroke.width * 0.8f, StrokeCap.Round)
+    val c = center
+    val ring = s * 0.27f
+    val toothW = s * 0.15f
+    val toothL = s * 0.13f
+    for (i in 0 until 8) {
+        rotate(i * 45f, c) {
+            drawRect(color, topLeft = Offset(c.x - toothW / 2, c.y - ring - toothL), size = Size(toothW, toothL + s * 0.04f))
         }
     }
-    rotate(250f, center) {
-        drawLine(color, center, Offset(center.x + r * 0.55f, center.y), stroke.width, StrokeCap.Round)
-    }
-    drawCircle(color, radius = s * 0.06f, center = center)
+    // Ring drawn as a thick stroke, so the hole stays transparent over the viewfinder.
+    val hole = s * 0.1f
+    val outer = ring + stroke.width / 2
+    drawCircle(color, radius = (outer + hole) / 2, center = c, style = Stroke(width = outer - hole))
 }
 
 private fun DrawScope.drawGrid(color: Color, stroke: Stroke, s: Float) {

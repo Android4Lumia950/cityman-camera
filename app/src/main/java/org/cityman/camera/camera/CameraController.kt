@@ -72,6 +72,8 @@ data class CameraState(
     /** The phone is resting: multi-frame photos use the long night exposures. */
     val still: Boolean = false,
     val showHistogram: Boolean = false,
+    /** Follow Android's dynamic accent colour (Material You) instead of amber. */
+    val systemAccent: Boolean = true,
     /** Gallery app chosen for the thumbnail button (package name), null = system default. */
     val galleryPackage: String? = null,
     val shutterSound: Boolean = true,
@@ -132,6 +134,7 @@ class CameraController(private val context: Context) {
             format = runCatching { PhotoFormat.valueOf(prefs.getString("format", null) ?: "FULL") }.getOrDefault(PhotoFormat.FULL),
             multiFrame = prefs.getBoolean("mf", false),
             showHistogram = prefs.getBoolean("histogram", false),
+            systemAccent = prefs.getBoolean("systemAccent", true),
             galleryPackage = prefs.getString("gallery", null),
             shutterSound = prefs.getBoolean("sound", true),
             timerSeconds = prefs.getInt("timer", 0),
@@ -408,6 +411,18 @@ class CameraController(private val context: Context) {
         if (c.hasAutoFocus && controls.focusDiopters == null) triggerAf()
     }
 
+    fun setSystemAccent(on: Boolean) {
+        prefs.edit().putBoolean("systemAccent", on).apply()
+        _state.update { it.copy(systemAccent = on) }
+    }
+
+    /** Colour of the focus peaking marks (ARGB), following the UI accent. */
+    @Volatile var peakingColor: Int = 0xFFFFB300.toInt()
+        set(value) {
+            field = value
+            analyzer?.peakingColor = value
+        }
+
     fun setGallery(pkg: String?) {
         prefs.edit().putString("gallery", pkg).apply()
         _state.update { it.copy(galleryPackage = pkg) }
@@ -604,6 +619,7 @@ class CameraController(private val context: Context) {
                 }
                 a.zebra = st.zebra
                 a.peaking = st.peaking
+                a.peakingColor = peakingColor
                 outputs += OutputConfiguration(a.reader.surface)
                 withAnalysis = true
             }

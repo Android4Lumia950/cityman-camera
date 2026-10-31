@@ -57,7 +57,7 @@ fun ArcDial(
     val onIndexState by rememberUpdatedState(onIndex)
     val onDismissState by rememberUpdatedState(onDismiss)
     val labelStyle = remember { TextStyle(color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Normal) }
-    val labelActive = remember { TextStyle(color = Accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold) }
+    val labelActive = remember(Accent) { TextStyle(color = Accent, fontSize = 15.sp, fontWeight = FontWeight.SemiBold) }
     val titleStyle = remember { TextStyle(color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp, letterSpacing = 2.sp) }
     val valueStyle = remember { TextStyle(color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Light) }
 

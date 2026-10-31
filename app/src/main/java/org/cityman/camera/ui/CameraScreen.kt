@@ -69,7 +69,9 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -99,7 +101,15 @@ fun CameraScreen(
     val st by controller.state.collectAsStateWithLifecycle()
     var openDial by remember { mutableStateOf<DialKind?>(null) }
     var showSettings by remember { mutableStateOf(false) }
+    var showFullSettings by remember { mutableStateOf(false) }
     val rotation by animateFloatAsState(iconRotation, tween(250), label = "iconRotation")
+
+    // Accent colour: Android's dynamic accent (light tone, for the black UI) or amber.
+    val dynamicAccent = colorResource(android.R.color.system_accent1_300)
+    LaunchedEffect(st.systemAccent, dynamicAccent) {
+        Accent = if (st.systemAccent) dynamicAccent else Amber
+        controller.peakingColor = Accent.toArgb()
+    }
 
     // A dial belongs to one camera: close it when the camera or mode changes.
     LaunchedEffect(st.caps?.id, st.mode) { openDial = null }
@@ -233,21 +243,18 @@ fun CameraScreen(
             enter = fadeIn(), exit = fadeOut(),
             modifier = Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 64.dp),
         ) {
-            SettingsPanel(
+            QuickPanel(
                 state = st,
-                maxHeight = h - 80.dp,
                 onGrid = { controller.setGrid(it) },
                 onDng = { controller.setSaveDng(it) },
-                onFormat = { controller.setFormat(it) },
                 onMultiFrame = { controller.setMultiFrame(it) },
-                onFrames = { controller.setMultiFrameFrames(it) },
-                onOptions = { controller.setMultiFrameOptions(it) },
-                onTools = { h, z, p -> controller.setAnalysisTools(h, z, p) },
-                onSound = { controller.setShutterSound(it) },
-                galleryApps = galleryApps,
-                onGallery = { controller.setGallery(it) },
                 onTimer = { controller.setTimer(it) },
+                onMore = { showSettings = false; showFullSettings = true },
             )
+        }
+
+        if (showFullSettings) {
+            SettingsScreen(controller, st, galleryApps, onClose = { showFullSettings = false })
         }
 
         st.message?.let { msg ->
@@ -590,113 +597,46 @@ private fun RecordingTimer(since: Long, modifier: Modifier) {
     }
 }
 
+/** The few settings changed most often, in the same style as [SettingsScreen], which has the rest. */
 @Composable
-private fun SettingsPanel(
+private fun QuickPanel(
     state: CameraState,
-    maxHeight: androidx.compose.ui.unit.Dp,
     onGrid: (Boolean) -> Unit,
     onDng: (Boolean) -> Unit,
-    onFormat: (PhotoFormat) -> Unit,
     onMultiFrame: (Boolean) -> Unit,
-    onFrames: (Int) -> Unit,
-    onOptions: (ProcessingOptions) -> Unit,
-    onTools: (Boolean, Boolean, Boolean) -> Unit,
-    onSound: (Boolean) -> Unit,
     onTimer: (Int) -> Unit,
-    galleryApps: () -> List<Pair<String, String>>,
-    onGallery: (String?) -> Unit,
+    onMore: () -> Unit,
 ) {
-    val caps = state.caps
+    val photo = state.mode == CaptureMode.PHOTO
+    val raw = state.caps?.rawSize != null
+    val title = TextStyle(color = Color.White, fontSize = 18.sp)
     Column(
         Modifier
             .width(300.dp)
-            .heightIn(max = maxHeight)
-            .background(Color(0xF0141414), RoundedCornerShape(12.dp))
-            .verticalScroll(rememberScrollState())
-            .padding(vertical = 6.dp),
+            .background(Color.Black.copy(alpha = 0.92f))
+            .border(1.dp, Color.White.copy(alpha = 0.25f))
+            .padding(horizontal = 18.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        ToggleRow(stringResource(R.string.settings_grid), state.grid) { onGrid(!state.grid) }
-        ToggleRow(stringResource(R.string.settings_sound), state.shutterSound) { onSound(!state.shutterSound) }
-        val apps = remember { galleryApps() }
-        if (apps.isNotEmpty()) {
-            SectionTitle(stringResource(R.string.settings_gallery))
-            val options = listOf<Pair<String?, String>>(null to stringResource(R.string.settings_gallery_default)) + apps
-            for ((pkg, label) in options) {
-                val selected = state.galleryPackage == pkg || (pkg == null && apps.none { it.first == state.galleryPackage })
-                Row(
-                    Modifier.clickable { onGallery(pkg) }.padding(horizontal = 16.dp, vertical = 9.dp).width(268.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
-                        Modifier.size(16.dp).border(2.dp, if (selected) Accent else Color.White.copy(alpha = 0.5f), CircleShape).padding(4.dp),
-                    ) {
-                        if (selected) Box(Modifier.fillMaxSize().background(Accent, CircleShape))
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    BasicText(label, style = TextStyle(color = Color.White, fontSize = 15.sp))
-                }
-            }
+        if (photo && raw) Toggle(stringResource(R.string.settings_mf_title), null, state.multiFrame, titleStyle = title) { onMultiFrame(it) }
+        if (photo) {
+            Choice(
+                title = stringResource(R.string.settings_timer_title),
+                desc = null,
+                options = listOf(0 to stringResource(R.string.settings_off), 3 to "3 s", 10 to "10 s"),
+                selected = state.timerSeconds,
+                horizontal = true,
+                titleStyle = title,
+                onSelect = onTimer,
+            )
         }
-        if (state.mode == CaptureMode.PHOTO) {
-            SectionTitle(stringResource(R.string.settings_timer))
-            Row(Modifier.padding(horizontal = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                for (t in listOf(0, 3, 10)) {
-                    Pill(if (t == 0) stringResource(R.string.settings_off) else "${t}s", state.timerSeconds == t) { onTimer(t) }
-                }
-            }
-        }
-        if (state.mode == CaptureMode.PHOTO) {
-            ToggleRow(stringResource(R.string.settings_histogram), state.showHistogram) { onTools(!state.showHistogram, state.zebra, state.peaking) }
-            ToggleRow(stringResource(R.string.settings_zebra), state.zebra) { onTools(state.showHistogram, !state.zebra, state.peaking) }
-            ToggleRow(stringResource(R.string.settings_peaking), state.peaking) { onTools(state.showHistogram, state.zebra, !state.peaking) }
-        }
-        if (caps?.rawSize != null && state.mode == CaptureMode.PHOTO) {
-            ToggleRow(stringResource(R.string.settings_mf), state.multiFrame) { onMultiFrame(!state.multiFrame) }
-            if (state.multiFrame) {
-                SectionTitle(stringResource(R.string.settings_mf_frames))
-                Row(Modifier.padding(horizontal = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    for (n in listOf(0, 4, 6, 8, 12)) {
-                        Pill(if (n == 0) stringResource(R.string.settings_auto) else n.toString(), state.mfFrames == n) { onFrames(n) }
-                    }
-                }
-                val o = state.mfOptions
-                ToggleRow(stringResource(R.string.settings_mf_denoise), o.denoise) { onOptions(o.copy(denoise = !o.denoise)) }
-                ToggleRow(stringResource(R.string.settings_mf_vivid), o.vivid) { onOptions(o.copy(vivid = !o.vivid)) }
-                ToggleRow(stringResource(R.string.settings_mf_tone), o.localTone) { onOptions(o.copy(localTone = !o.localTone)) }
-                ToggleRow(stringResource(R.string.settings_mf_chroma), o.chromaDenoise) { onOptions(o.copy(chromaDenoise = !o.chromaDenoise)) }
-                ToggleRow(stringResource(R.string.settings_mf_sharpen), o.sharpen) { onOptions(o.copy(sharpen = !o.sharpen)) }
-            }
-            ToggleRow(stringResource(if (state.multiFrame) R.string.settings_dng_mf else R.string.settings_dng), state.saveDng) { onDng(!state.saveDng) }
-        }
-        if (caps != null && state.mode == CaptureMode.PHOTO) {
-            SectionTitle(stringResource(R.string.settings_format))
-            Row(Modifier.padding(horizontal = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                val formats = PhotoFormat.entries.distinctBy { caps.jpegSize(it) }
-                for (f in formats) {
-                    val size = caps.jpegSize(f)
-                    val mp = size.width.toLong() * size.height / 1_000_000.0
-                    val label = when (f) {
-                        PhotoFormat.FULL -> stringResource(R.string.format_full)
-                        PhotoFormat.RATIO_4_3 -> "4:3"
-                        PhotoFormat.RATIO_16_9 -> "16:9"
-                    }
-                    val selected = caps.jpegSize(state.format) == size
-                    Column(
-                        Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (selected) Accent else Color.White.copy(alpha = 0.08f))
-                            .clickable { onFormat(f) }
-                            .padding(horizontal = 12.dp, vertical = 6.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        val color = if (selected) Color.Black else Color.White
-                        BasicText(label, style = TextStyle(color = color, fontSize = 14.sp, fontWeight = FontWeight.Medium))
-                        BasicText(String.format(Locale.US, "%.0f MP", mp), style = TextStyle(color = color.copy(alpha = 0.7f), fontSize = 11.sp))
-                    }
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-        }
+        Toggle(stringResource(R.string.settings_grid), null, state.grid, titleStyle = title) { onGrid(it) }
+        if (photo && raw) Toggle(stringResource(R.string.settings_dng_short), null, state.saveDng, titleStyle = title) { onDng(it) }
+        BasicText(
+            stringResource(R.string.settings_more),
+            style = TextStyle(color = Accent, fontSize = 17.sp),
+            modifier = Modifier.fillMaxWidth().clickable(onClick = onMore).padding(vertical = 2.dp),
+        )
     }
 }
 
@@ -728,10 +668,11 @@ private fun ToggleRow(label: String, on: Boolean, onToggle: () -> Unit) {
         Modifier
             .clickable(onClick = onToggle)
             .padding(horizontal = 16.dp, vertical = 10.dp)
-            .width(268.dp),
+            .width(248.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         BasicText(label, style = TextStyle(color = Color.White, fontSize = 15.sp), modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(8.dp))
         Box(
             Modifier
                 .size(width = 40.dp, height = 22.dp)
