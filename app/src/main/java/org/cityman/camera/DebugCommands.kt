@@ -6,12 +6,15 @@ import org.cityman.camera.camera.CaptureMode
 import org.cityman.camera.camera.ManualControls
 
 /**
- * Debug builds only: drive the camera from adb without touching the screen, e.g.
- * `adb shell am start -n org.cityman.camera/.MainActivity --ez dng true --ei iso 200 --ez shoot true`.
+ * Debug builds only: drive the camera from adb without touching the screen, while the app is
+ * in the foreground, e.g.
+ * `adb shell am broadcast -a org.cityman.camera.DEBUG --ez dng true --ei iso 200 --ez shoot true`.
  * Extras: dng (bool), iso (int, 0 = auto), shutter_us (long, 0 = auto), wb (int K, 0 = auto),
  * focus (float diopters, -1 = auto), ev (int steps), reset (bool), mode (photo|video), shoot (bool).
  */
 object DebugCommands {
+    const val ACTION = "org.cityman.camera.DEBUG"
+
     fun apply(intent: Intent, controller: CameraController) {
         val extras = intent.extras ?: return
         val st = controller.state.value

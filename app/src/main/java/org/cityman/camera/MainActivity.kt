@@ -2,6 +2,9 @@ package org.cityman.camera
 
 import android.Manifest
 import android.content.ActivityNotFoundException
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
@@ -119,9 +122,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        if (BuildConfig.DEBUG) DebugCommands.apply(intent, controller)
+    private val debugReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) = DebugCommands.apply(intent, controller)
     }
 
     override fun onResume() {
@@ -130,11 +132,15 @@ class MainActivity : ComponentActivity() {
         controller.displayRotationDegrees = displayDegrees()
         getSystemService(DisplayManager::class.java).registerDisplayListener(displayListener, null)
         orientationListener.enable()
+        if (BuildConfig.DEBUG) {
+            registerReceiver(debugReceiver, IntentFilter(DebugCommands.ACTION), RECEIVER_EXPORTED)
+        }
         hasCamera = granted(Manifest.permission.CAMERA)
         if (hasCamera) controller.start() else if (!asked) requestPermissions()
     }
 
     override fun onPause() {
+        if (BuildConfig.DEBUG) unregisterReceiver(debugReceiver)
         getSystemService(DisplayManager::class.java).unregisterDisplayListener(displayListener)
         orientationListener.disable()
         controller.stop()

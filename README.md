@@ -84,6 +84,16 @@ Camera log lines are tagged `ArcoCamera`:
 adb logcat -s ArcoCamera
 ```
 
+Debug builds also take commands over adb while the app is in the foreground (no screen taps),
+for example a DNG shot at ISO 200:
+
+```bash
+adb shell am broadcast -a org.cityman.camera.DEBUG --ez dng true --ei iso 200 --ez shoot true
+```
+
+Extras: `dng`, `iso` (0 = auto), `shutter_us`, `wb` (Kelvin, 0 = auto), `focus` (diopters,
+−1 = auto), `ev` (steps), `reset`, `mode` (`photo`/`video`), `shoot`. See `DebugCommands.kt`.
+
 ## Code map
 
 - `camera/CameraController.kt` — Camera2 session, viewfinder (SurfaceView), still/RAW capture,
