@@ -609,7 +609,10 @@ class CameraController(private val context: Context) {
             camera.close()
             if (device == camera) device = null
             closeSession()
-            report("Camera error $error")
+            closingSession = null
+            pendingCreate = null
+            releaseRetired()
+            recoverCamera("camera error $error")
         }
     }
 
@@ -618,8 +621,13 @@ class CameraController(private val context: Context) {
         _state.update { it.copy(countdown = 0) }
         if (recorder != null) stopRecording(restartPreview = false)
         closeSession()
+        pendingCreate = null
         device?.close()
         device = null
+        // The device is closed: nothing waits for the old session any more.
+        closingSession = null
+        camHandler.removeCallbacks(closeTimeout)
+        releaseRetired()
         video?.release()
         video = null
         analyzer?.release()
@@ -629,15 +637,26 @@ class CameraController(private val context: Context) {
         camHandler.removeCallbacks(afTimeout)
     }
 
+    /**
+     * Stops the current session cleanly. This HAL (2015 Qualcomm HAL3) cannot reconfigure streams
+     * while frames are in flight: repeating requests are stopped and in-flight captures aborted,
+     * and the next session is only created once this one reports onClosed. Its image readers are
+     * closed then too, not while the HAL may still write into them.
+     */
     private fun closeSession() {
         if (recorder != null) stopRecording(restartPreview = false)
-        try {
-            session?.close()
-        } catch (_: Exception) {
-        }
+        val s = session
         session = null
+        if (s != null) {
+            try { s.stopRepeating() } catch (_: Exception) {}
+            try { s.abortCaptures() } catch (_: Exception) {}
+            try { s.close() } catch (_: Exception) {}
+            closingSession = s
+            camHandler.removeCallbacks(closeTimeout)
+            camHandler.postDelayed(closeTimeout, 2500)
+        }
         previewSurface = null
-        jpegReader?.close()
+        jpegReader?.let { retiredReaders += it }
         jpegReader = null
         // A burst frame may be on the GPU right now: stop the burst and let the GPU thread
         // finish that frame before the reader (and the frame's buffer) goes away.
@@ -646,9 +665,39 @@ class CameraController(private val context: Context) {
             job.failed = true
             runOnThreadAndWait(gpuHandler, 3000) {}
         }
-        rawReader?.close()
+        rawReader?.let { retiredReaders += it }
         rawReader = null
         finishShot(force = true)
+        if (closingSession == null) releaseRetired()
+    }
+
+    /** The session being closed; new sessions wait for its onClosed. */
+    private var closingSession: CameraCaptureSession? = null
+    private var pendingCreate: (() -> Unit)? = null
+    private val retiredReaders = ArrayList<ImageReader>()
+
+    private val closeTimeout = Runnable {
+        if (closingSession != null) {
+            Log.w(TAG, "old session did not report onClosed in time")
+            sessionClosed(closingSession!!)
+        }
+    }
+
+    /** cam thread: the old session is gone, run what waited for it. */
+    private fun sessionClosed(s: CameraCaptureSession) {
+        if (s !== closingSession) return
+        closingSession = null
+        camHandler.removeCallbacks(closeTimeout)
+        releaseRetired()
+        pendingCreate?.let {
+            pendingCreate = null
+            it()
+        }
+    }
+
+    private fun releaseRetired() {
+        retiredReaders.forEach { runCatching { it.close() } }
+        retiredReaders.clear()
     }
 
     /** New stream set: pick sizes, resize the viewfinder surface, then [createSession]. */
@@ -673,6 +722,11 @@ class CameraController(private val context: Context) {
         val dev = device ?: return
         val c = caps ?: return
         if (gen != configGen || !surface.isValid) return
+        if (closingSession != null) {
+            // Wait for the old session to drain and close first (latest request wins).
+            pendingCreate = { createSession(surface, gen, onReady) }
+            return
+        }
         val st = _state.value
         previewSurface = surface
         val outputs = mutableListOf(OutputConfiguration(surface))
@@ -723,12 +777,18 @@ class CameraController(private val context: Context) {
         val config = SessionConfiguration(
             SessionConfiguration.SESSION_REGULAR, outputs, camExecutor,
             object : CameraCaptureSession.StateCallback() {
+                override fun onClosed(s: CameraCaptureSession) {
+                    sessionClosed(s)
+                }
+
                 override fun onConfigured(s: CameraCaptureSession) {
                     if (gen != configGen || device == null) {
+                        closingSession = s
                         s.close()
                         return
                     }
                     session = s
+                    recoveries = 0
                     startRepeating()
                     onReady?.invoke()
                 }
@@ -757,8 +817,25 @@ class CameraController(private val context: Context) {
             dev.createCaptureSession(config)
         } catch (e: Exception) {
             Log.e(TAG, "createCaptureSession", e)
-            report("Could not start the camera session: ${e.message}")
+            recoverCamera("createCaptureSession: ${e.message}")
         }
+    }
+
+    private var recoveries = 0
+
+    /**
+     * The HAL refused or errored: close the device and open it again, once per launch, before
+     * telling the user.
+     */
+    private fun recoverCamera(why: String) {
+        if (recoveries >= 1 || !started) {
+            report("Could not start the camera session: $why")
+            return
+        }
+        recoveries++
+        Log.w(TAG, "reopening the camera after: $why")
+        closeCamera()
+        camHandler.postDelayed({ if (started) openCamera() }, 700)
     }
 
     private fun previewRequest(): CaptureRequest.Builder? {
