@@ -97,7 +97,9 @@ Oggi (6 fotogrammi): circa 2 s di fusione sovrapposta alla cattura, 1 s di rifin
 
 ---
 
-## Fase 5 — Integrazione nella ROM
+## Fase 5 — Integrazione nella ROM (rimandata)
+
+Rimandata dall'utente il 31/10: per ora si lavora sulle fasi 1–4.
 
 - Arco nel device tree cityman come app di sistema (prebuilt firmato o compilata da sorgente),
   scelta dell'utente se affiancarla ad Aperture o sostituirla come predefinita.

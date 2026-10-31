@@ -35,6 +35,8 @@ data class BurstSetup(
     /** Digital gain to apply after merging (under-exposure and ISO cap compensation). */
     val gain: Float,
     val rotation: Int,
+    /** Pixels dropped on each side of the output (RAW wider than the active array). */
+    val crop: Int = 0,
     val iso: Int,
     val options: ProcessingOptions,
 )
@@ -289,8 +291,10 @@ class MultiFrameProcessor {
         ref?.release(); ref = null
 
         val rotated = s.rotation == 90 || s.rotation == 270
-        val ow = if (rotated) s.height else s.width
-        val oh = if (rotated) s.width else s.height
+        val cw = s.width - 2 * s.crop
+        val chh = s.height - 2 * s.crop
+        val ow = if (rotated) chh else cw
+        val oh = if (rotated) cw else chh
         val out = Tex(ow, oh, GLES31.GL_RGBA8)
         run {
             val p = program("sharpen", Shaders.SHARPEN)
@@ -299,7 +303,8 @@ class MultiFrameProcessor {
             out.bindImage(1, GLES31.GL_WRITE_ONLY)
             p.set("uRot", s.rotation)
             p.set("uAmount", if (o.sharpen) 0.55f else 0f)
-            p.dispatch(s.width, s.height)
+            p.set("uCrop", s.crop)
+            p.dispatch(cw, chh)
         }
         tone.release()
 

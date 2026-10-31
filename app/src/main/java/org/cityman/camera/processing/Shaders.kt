@@ -18,22 +18,39 @@ precision highp usampler2D;
 """
     private const val GRID = HEADER + "layout(local_size_x = 8, local_size_y = 8) in;\n"
 
-    /** Bayer RAW16 → quad, black level removed. */
+    /**
+     * Bayer RAW16 → quad, black level removed. Hot and dead pixels are replaced on the way: a
+     * sample far above (or below) its four nearest same-colour neighbours takes their median.
+     */
     val PACK = GRID + """
 uniform highp usampler2D uRaw;
 layout(rgba16f, binding = 0) writeonly uniform image2D uQuad;
 uniform ivec2 uOff[4];
 uniform vec4 uBlack;
 uniform float uWhite;
+float raw(ivec2 p, ivec2 lim) {
+    return float(texelFetch(uRaw, clamp(p, ivec2(0), lim), 0).r);
+}
 void main() {
     ivec2 q = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(q, imageSize(uQuad)))) return;
+    ivec2 lim = textureSize(uRaw, 0) - 1;
     ivec2 b = q * 2;
-    vec4 v = vec4(
-        float(texelFetch(uRaw, b + uOff[0], 0).r),
-        float(texelFetch(uRaw, b + uOff[1], 0).r),
-        float(texelFetch(uRaw, b + uOff[2], 0).r),
-        float(texelFetch(uRaw, b + uOff[3], 0).r));
+    vec4 v;
+    for (int c = 0; c < 4; c++) {
+        ivec2 p = b + uOff[c];
+        float x = raw(p, lim);
+        float n0 = raw(p + ivec2(2, 0), lim), n1 = raw(p - ivec2(2, 0), lim);
+        float n2 = raw(p + ivec2(0, 2), lim), n3 = raw(p - ivec2(0, 2), lim);
+        float hi = max(max(n0, n1), max(n2, n3));
+        float lo = min(min(n0, n1), min(n2, n3));
+        float range = uWhite - uBlack[c];
+        if (x > hi + 0.5 * (hi - uBlack[c]) + 0.03 * range || x < lo - 0.5 * (lo - uBlack[c]) - 0.03 * range) {
+            // median of four = mean of the two middle values
+            x = 0.5 * (n0 + n1 + n2 + n3 - hi - lo);
+        }
+        v[c] = x;
+    }
     v = (v - uBlack) / (uWhite - uBlack);
     imageStore(uQuad, q, clamp(v, -0.1, 1.0));
 }
@@ -472,11 +489,13 @@ layout(rgba8, binding = 0) readonly uniform image2D uSrc;
 layout(rgba8, binding = 1) writeonly uniform image2D uDst;
 uniform int uRot;
 uniform float uAmount;
+uniform int uCrop;
 void main() {
-    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 size = imageSize(uSrc);
-    if (any(greaterThanEqual(p, size))) return;
-    ivec2 s = size - 1;
+    ivec2 o = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uSrc) - 2 * uCrop;
+    if (any(greaterThanEqual(o, size))) return;
+    ivec2 p = o + ivec2(uCrop);
+    ivec2 s = imageSize(uSrc) - 1;
     vec3 c = imageLoad(uSrc, p).rgb;
     vec3 outc = c;
     if (uAmount > 0.0) {
@@ -491,10 +510,11 @@ void main() {
         d = sign(d) * max(abs(d) - 0.004, 0.0);
         outc = clamp(c + uAmount * d, 0.0, 1.0);
     }
-    ivec2 q = p;
-    if (uRot == 90) q = ivec2(s.y - p.y, p.x);
-    else if (uRot == 180) q = ivec2(s.x - p.x, s.y - p.y);
-    else if (uRot == 270) q = ivec2(p.y, s.x - p.x);
+    ivec2 m = size - 1;
+    ivec2 q = o;
+    if (uRot == 90) q = ivec2(m.y - o.y, o.x);
+    else if (uRot == 180) q = ivec2(m.x - o.x, m.y - o.y);
+    else if (uRot == 270) q = ivec2(o.y, m.x - o.x);
     imageStore(uDst, q, vec4(outc, 1.0));
 }
 """

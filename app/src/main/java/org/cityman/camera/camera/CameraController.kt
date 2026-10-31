@@ -26,7 +26,6 @@ import android.media.ExifInterface
 import android.media.Image
 import android.media.ImageReader
 import android.media.MediaActionSound
-import android.media.MediaCodec
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Handler
@@ -45,7 +44,6 @@ import org.cityman.camera.processing.MultiFrameProcessor
 import org.cityman.camera.processing.ProcessingOptions
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
@@ -185,8 +183,7 @@ class CameraController(private val context: Context) {
     private var previewSurface: Surface? = null
     private var jpegReader: ImageReader? = null
     private var rawReader: ImageReader? = null
-    private var recorderSurface: Surface? = null
-    private var recorderSurfaceSize: Size? = null
+    private var video: VideoPipeline? = null
     private var recorder: MediaRecorder? = null
     private var recordingUri: Uri? = null
     private var recordingFd: ParcelFileDescriptor? = null
@@ -227,10 +224,6 @@ class CameraController(private val context: Context) {
     }
 
     fun release() {
-        camHandler.post {
-            recorderSurface?.release()
-            recorderSurface = null
-        }
         gpuHandler.post { processor.release() }
         gpuThread.quitSafely()
         camThread.quitSafely()
@@ -256,7 +249,7 @@ class CameraController(private val context: Context) {
 
     fun setMode(mode: CaptureMode) = camHandler.post {
         if (_state.value.mode == mode) return@post
-        if (recorder != null) stopRecording()
+        if (recorder != null) stopRecording(restartPreview = false)
         clearTapRegions()
         _state.update { it.copy(mode = mode) }
         reconfigure()
@@ -376,7 +369,7 @@ class CameraController(private val context: Context) {
     fun shutter() = camHandler.post {
         when (_state.value.mode) {
             CaptureMode.PHOTO -> takePicture()
-            CaptureMode.VIDEO -> if (recorder == null) startRecording() else stopRecording()
+            CaptureMode.VIDEO -> if (recorder == null) startRecording() else stopRecording(restartPreview = true)
         }
     }
 
@@ -436,16 +429,18 @@ class CameraController(private val context: Context) {
     }
 
     private fun closeCamera() {
-        if (recorder != null) stopRecording()
+        if (recorder != null) stopRecording(restartPreview = false)
         closeSession()
         device?.close()
         device = null
+        video?.release()
+        video = null
         waitingAf = false
         camHandler.removeCallbacks(afTimeout)
     }
 
     private fun closeSession() {
-        if (recorder != null) stopRecording()
+        if (recorder != null) stopRecording(restartPreview = false)
         try {
             session?.close()
         } catch (_: Exception) {
@@ -454,6 +449,13 @@ class CameraController(private val context: Context) {
         previewSurface = null
         jpegReader?.close()
         jpegReader = null
+        // A burst frame may be on the GPU right now: stop the burst and let the GPU thread
+        // finish that frame before the reader (and the frame's buffer) goes away.
+        burst?.let { job ->
+            job.cancelled = true
+            job.failed = true
+            runOnThreadAndWait(gpuHandler, 3000) {}
+        }
         rawReader?.close()
         rawReader = null
         finishShot(force = true)
@@ -477,7 +479,7 @@ class CameraController(private val context: Context) {
         }
     }
 
-    private fun createSession(surface: Surface, gen: Int) {
+    private fun createSession(surface: Surface, gen: Int, onReady: (() -> Unit)? = null) {
         val dev = device ?: return
         val c = caps ?: return
         if (gen != configGen || !surface.isValid) return
@@ -502,8 +504,12 @@ class CameraController(private val context: Context) {
                 withRaw = true
             }
         } else {
-            val rs = ensureRecorderSurface(c.videoSize()) ?: return
-            outputs += OutputConfiguration(rs)
+            val size = c.videoSize()
+            val vp = video?.takeIf { it.size == size } ?: run {
+                video?.release()
+                VideoPipeline(size).also { video = it }
+            }
+            outputs += OutputConfiguration(vp.reader.surface)
         }
         Log.i(TAG, "session gen=$gen camera=${c.id} mode=${st.mode} preview=${_state.value.previewSize} raw=$withRaw")
         val config = SessionConfiguration(
@@ -516,6 +522,7 @@ class CameraController(private val context: Context) {
                     }
                     session = s
                     startRepeating()
+                    onReady?.invoke()
                 }
 
                 override fun onConfigureFailed(s: CameraCaptureSession) {
@@ -527,6 +534,7 @@ class CameraController(private val context: Context) {
                         reconfigure()
                     } else {
                         report("Could not start the camera session")
+                        if (recorder != null) stopRecording(restartPreview = false)
                     }
                 }
             },
@@ -545,7 +553,7 @@ class CameraController(private val context: Context) {
         val recording = recorder != null
         val b = dev.createCaptureRequest(if (recording) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW)
         b.addTarget(surface)
-        if (recording) recorderSurface?.let { b.addTarget(it) }
+        if (recording) video?.let { b.addTarget(it.reader.surface) }
         applyControls(b, still = false)
         return b
     }
@@ -924,10 +932,15 @@ class CameraController(private val context: Context) {
 
     // ---- multi-frame burst ------------------------------------------------------------
 
-    private class Burst(val total: Int, val setup: BurstSetup) {
+    /** What goes into the EXIF of a multi-frame photo. */
+    private data class ShotInfo(val iso: Int, val exposureNs: Long, val frames: Int, val fNumber: Float?, val focalMm: Float?)
+
+    private class Burst(val total: Int, val setup: BurstSetup, val info: ShotInfo) {
         /** gpu thread */
         var received = 0
         @Volatile var failed = false
+        /** Stopped on purpose (app paused, camera closed): no error message. */
+        @Volatile var cancelled = false
         var finished = false
         @Volatile var expected = total
         @Volatile var firstResult: TotalCaptureResult? = null
@@ -999,8 +1012,14 @@ class CameraController(private val context: Context) {
         val setup = BurstSetup(
             width = raw.width, height = raw.height, chanAt = cfaChannels(c), black = black, white = white,
             gain = plan.gain, rotation = current.orientation, iso = plan.iso, options = _state.value.mfOptions,
+            crop = if (raw.width == c.activeArray.width() && raw.height == c.activeArray.height()) 0 else 16,
         )
-        val job = Burst(plan.frames, setup)
+        val info = ShotInfo(
+            iso = plan.iso, exposureNs = plan.exposureNs, frames = plan.frames,
+            fNumber = c.chars[CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES]?.firstOrNull(),
+            focalMm = c.chars[CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS]?.firstOrNull()?.takeIf { it > 0f },
+        )
+        val job = Burst(plan.frames, setup, info)
         Log.i(TAG, "burst ${plan.frames} × ISO ${plan.iso} ${plan.exposureNs / 1000} µs, gain ${plan.gain}")
         gpuHandler.post {
             try {
@@ -1090,7 +1109,7 @@ class CameraController(private val context: Context) {
         burst = null
         if (job.failed || result == null || job.received == 0) {
             processor.abort()
-            report("Multi-frame processing failed")
+            if (!job.cancelled) report("Multi-frame processing failed")
             camHandler.post { if (shot?.burst == true) finishShot(force = true) }
             return
         }
@@ -1113,17 +1132,19 @@ class CameraController(private val context: Context) {
             }
         }
         ioHandler.post {
-            if (bitmap != null) saveBitmap(bitmap) else report("Multi-frame processing failed")
+            if (bitmap != null) saveBitmap(bitmap, job.info) else report("Multi-frame processing failed")
         }
     }
 
     /** io thread */
-    private fun saveBitmap(bitmap: Bitmap) {
+    private fun saveBitmap(bitmap: Bitmap, info: ShotInfo) {
         try {
             val uri = store.createImage(store.baseName("IMG") + "_MF.jpg", "image/jpeg") ?: error("MediaStore insert failed")
             val t0 = SystemClock.elapsedRealtime()
             store.write(uri) { bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it) }
             Log.i(TAG, "JPEG encode ${SystemClock.elapsedRealtime() - t0} ms")
+            runCatching { writeExif(uri, bitmap.width, bitmap.height, info) }
+                .onFailure { Log.w(TAG, "EXIF", it) }
             store.publish(uri)
             val scale = 256f / max(bitmap.width, bitmap.height)
             val thumb = Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).roundToInt(), (bitmap.height * scale).roundToInt(), true)
@@ -1136,43 +1157,35 @@ class CameraController(private val context: Context) {
         }
     }
 
-    // ---- video --------------------------------------------------------------------------
-
-    private fun ensureRecorderSurface(size: Size): Surface? {
-        if (recorderSurface != null && recorderSurfaceSize == size) return recorderSurface
-        recorderSurface?.release()
-        recorderSurface = null
-        return try {
-            val surface = MediaCodec.createPersistentInputSurface()
-            // A throwaway recorder gives the persistent surface its buffer size.
-            val dummy = File(context.cacheDir, "sizing.mp4")
-            MediaRecorder(context).apply {
-                setVideoSource(MediaRecorder.VideoSource.SURFACE)
-                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                setOutputFile(dummy.absolutePath)
-                setVideoEncoder(MediaRecorder.VideoEncoder.H264)
-                setVideoSize(size.width, size.height)
-                setVideoFrameRate(30)
-                setInputSurface(surface)
-                prepare()
-                release()
-            }
-            dummy.delete()
-            recorderSurface = surface
-            recorderSurfaceSize = size
-            surface
-        } catch (e: Exception) {
-            Log.e(TAG, "recorder surface", e)
-            report("Video recording is not available: ${e.message}")
-            null
+    /** io thread: capture details for a multi-frame JPEG (the pixels are already upright). */
+    private fun writeExif(uri: Uri, width: Int, height: Int, info: ShotInfo) {
+        context.contentResolver.openFileDescriptor(uri, "rw")?.use { fd ->
+            val exif = ExifInterface(fd.fileDescriptor)
+            val now = java.text.SimpleDateFormat("yyyy:MM:dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+            exif.setAttribute(ExifInterface.TAG_MAKE, android.os.Build.MANUFACTURER)
+            exif.setAttribute(ExifInterface.TAG_MODEL, android.os.Build.MODEL)
+            exif.setAttribute(ExifInterface.TAG_SOFTWARE, "Arco (multi-frame, ${info.frames} frames)")
+            exif.setAttribute(ExifInterface.TAG_DATETIME, now)
+            exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, now)
+            exif.setAttribute(ExifInterface.TAG_DATETIME_DIGITIZED, now)
+            exif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
+            exif.setAttribute(ExifInterface.TAG_IMAGE_WIDTH, width.toString())
+            exif.setAttribute(ExifInterface.TAG_IMAGE_LENGTH, height.toString())
+            exif.setAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS, info.iso.toString())
+            exif.setAttribute(ExifInterface.TAG_EXPOSURE_TIME, String.format(java.util.Locale.US, "%.6f", info.exposureNs / 1e9))
+            info.fNumber?.let { exif.setAttribute(ExifInterface.TAG_F_NUMBER, String.format(java.util.Locale.US, "%.1f", it)) }
+            info.focalMm?.let { exif.setAttribute(ExifInterface.TAG_FOCAL_LENGTH, "${(it * 100).roundToInt()}/100") }
+            exif.saveAttributes()
         }
     }
 
+    // ---- video --------------------------------------------------------------------------
+
     private fun startRecording() {
         val c = caps ?: return
-        val surface = recorderSurface ?: return
+        val vp = video ?: return
         if (session == null || recorder != null) return
-        val size = c.videoSize()
+        val size = vp.size
         val audio = context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         val uri = store.createVideo(store.baseName("VID") + ".mp4") ?: run {
             report("Could not create the video file")
@@ -1196,11 +1209,12 @@ class CameraController(private val context: Context) {
                 r.setAudioSamplingRate(48_000)
             }
             r.setOrientationHint(jpegOrientation(c))
-            r.setInputSurface(surface)
             r.prepare()
             r.start()
+            vp.attach(r.surface)
         } catch (e: Exception) {
             Log.e(TAG, "start recording", e)
+            runCatching { vp.detach() }
             r.release()
             fd.close()
             store.discard(uri)
@@ -1215,16 +1229,20 @@ class CameraController(private val context: Context) {
         _state.update { it.copy(recording = true, recordingSince = SystemClock.elapsedRealtime()) }
     }
 
-    private fun stopRecording() {
+    @Suppress("UNUSED_PARAMETER")
+    private fun stopRecording(restartPreview: Boolean) {
         val r = recorder ?: return
         recorder = null
+        // Stop sending frames to the recorder before stopping it.
         startRepeating()
+        runCatching { video?.detach() }
+        val drawn = video?.framesDrawn ?: 0
         val uri = recordingUri
         val ok = try {
             r.stop()
             true
         } catch (e: Exception) {
-            Log.e(TAG, "stop recording", e)
+            Log.e(TAG, "stop recording ($drawn frames drawn)", e)
             false
         }
         r.release()
@@ -1236,6 +1254,7 @@ class CameraController(private val context: Context) {
         if (uri != null) {
             if (ok) {
                 store.publish(uri)
+                Log.i(TAG, "saved $uri (video, $drawn frames)")
                 ioHandler.post {
                     val thumb = store.thumbnail(uri, true)
                     _state.update { it.copy(thumbnail = thumb ?: it.thumbnail, lastUri = uri, lastIsVideo = true) }
@@ -1259,6 +1278,22 @@ class CameraController(private val context: Context) {
     private fun report(msg: String) {
         Log.w(TAG, msg)
         _state.update { it.copy(message = msg) }
+    }
+
+    private fun runOnThreadAndWait(handler: Handler, timeoutMs: Long, block: () -> Unit) {
+        if (Looper.myLooper() == handler.looper) {
+            block()
+            return
+        }
+        val latch = CountDownLatch(1)
+        handler.post {
+            try {
+                block()
+            } finally {
+                latch.countDown()
+            }
+        }
+        latch.await(timeoutMs, TimeUnit.MILLISECONDS)
     }
 
     private fun runOnCamAndWait(timeoutMs: Long = 1000, block: () -> Unit) {
