@@ -865,6 +865,7 @@ class CameraController(private val context: Context) {
         val mf = _state.value.multiFrame && rawReader != null
         shot = Shot(jpegOrientation(c), rawReader != null && !mf, SystemClock.elapsedRealtime(), mf)
         _state.update { it.copy(capturing = true) }
+        analyzer?.paused = true
         val needAf = c.hasAutoFocus && controls.focusDiopters == null && focusRegion == null &&
             afState != CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED &&
             afState != CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED
@@ -1030,6 +1031,7 @@ class CameraController(private val context: Context) {
             burst = null
         }
         shot = null
+        analyzer?.paused = false
         waitingAf = false
         camHandler.removeCallbacks(afTimeout)
         _state.update { it.copy(capturing = false, processing = false) }

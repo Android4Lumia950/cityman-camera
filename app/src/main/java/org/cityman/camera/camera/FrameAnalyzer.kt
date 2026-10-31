@@ -28,6 +28,8 @@ class FrameAnalyzer(val size: Size, private val sink: (Analysis) -> Unit) {
     private val handler = Handler(thread.looper)
     val reader: ImageReader = ImageReader.newInstance(size.width, size.height, ImageFormat.YUV_420_888, 2)
 
+    /** Skip frames while a photo is captured and processed, to leave the CPU to that. */
+    @Volatile var paused = false
     @Volatile var zebra = false
     @Volatile var peaking = false
     @Volatile var latestClipped = -1f
@@ -54,7 +56,7 @@ class FrameAnalyzer(val size: Size, private val sink: (Analysis) -> Unit) {
             } ?: return@setOnImageAvailableListener
             try {
                 val now = SystemClock.elapsedRealtime()
-                if (now - last < 100) return@setOnImageAvailableListener
+                if (paused || now - last < 100) return@setOnImageAvailableListener
                 last = now
                 val plane = image.planes[0]
                 val buf = plane.buffer
