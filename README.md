@@ -149,6 +149,10 @@ background (0.8–1.4 s) and the shutter is free again before that. With `PROFIL
 Not done yet: DNG output in multi-frame mode, the HAL's hardware JPEG encoder (through YUV
 reprocessing) instead of the CPU one, super-resolution, a learned or frequency-domain merge.
 
+## Roadmap
+
+Future work, in phases with exit criteria: [ROADMAP.md](ROADMAP.md) (Italian).
+
 ## Licence
 
 GPL-3.0-or-later (see `LICENSE`). The app is GPL so that code from GPL projects such as
