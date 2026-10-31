@@ -1372,6 +1372,7 @@ class CameraController(private val context: Context) {
             gain = plan.gain, rotation = current.orientation, iso = plan.iso, options = _state.value.mfOptions,
             frames = plan.frames,
             underEv = plan.underEv,
+            zoom = zoom,
             crop = if (raw.width == c.activeArray.width() && raw.height == c.activeArray.height()) 0 else 16,
         )
         val info = ShotInfo(
@@ -1380,7 +1381,7 @@ class CameraController(private val context: Context) {
             focalMm = c.chars[CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS]?.firstOrNull()?.takeIf { it > 0f },
         )
         val job = Burst(plan.frames, setup, info)
-        Log.i(TAG, "burst ${plan.frames} × ISO ${plan.iso} ${plan.exposureNs / 1000} µs, gain ${plan.gain}")
+        Log.i(TAG, "burst ${plan.frames} × ISO ${plan.iso} ${plan.exposureNs / 1000} µs, gain ${plan.gain}, zoom $zoom")
         gpuHandler.post {
             try {
                 processor.begin(setup)

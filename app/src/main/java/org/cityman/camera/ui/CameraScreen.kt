@@ -191,7 +191,6 @@ fun CameraScreen(
             )
             if (st.mode == CaptureMode.VIDEO && st.timelapse > 1) Badge("${st.timelapse}×")
             if (st.multiFrame && st.still && st.mode == CaptureMode.PHOTO) Badge(stringResource(R.string.badge_still))
-            if (st.zoom > 1.01f) Badge(String.format(Locale.US, "%.1f×", st.zoom))
             if (st.focusPoint != null) Badge(stringResource(R.string.badge_locked))
         }
 
@@ -219,6 +218,23 @@ fun CameraScreen(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
+        }
+
+        // Zoom presets within thumb reach: above the shutter (portrait) or beside it (landscape).
+        val caps2 = st.caps
+        if (openDial == null && caps2 != null && caps2.maxZoom > 1.5f) {
+            ZoomButtons(
+                zoom = st.zoom,
+                maxZoom = caps2.maxZoom,
+                vertical = !portrait,
+                rotation = rotation,
+                onZoom = { controller.setZoom(it) },
+                modifier = if (portrait) {
+                    Modifier.align(Alignment.BottomCenter).padding(bottom = BarWidth + 84.dp)
+                } else {
+                    Modifier.align(Alignment.CenterEnd).padding(end = BarWidth + 10.dp)
+                },
+            )
         }
 
         ShutterBar(
@@ -341,6 +357,46 @@ private fun Viewfinder(
             }
         }
         if (flash.value > 0f) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = flash.value)))
+    }
+}
+
+/** 1× / 2× / 4× buttons; the one in use shows the exact zoom while pinching. */
+@Composable
+private fun ZoomButtons(
+    zoom: Float,
+    maxZoom: Float,
+    vertical: Boolean,
+    rotation: Float,
+    onZoom: (Float) -> Unit,
+    modifier: Modifier,
+) {
+    val presets = listOf(1f, 2f, 4f).filter { it <= maxZoom + 0.01f }
+    val content: @Composable () -> Unit = {
+        presets.forEachIndexed { i, p ->
+            val next = presets.getOrNull(i + 1) ?: Float.MAX_VALUE
+            val active = zoom >= p - 0.01f && zoom < next - 0.01f
+            val label = if (active && kotlin.math.abs(zoom - p) > 0.05f) String.format(Locale.US, "%.1f×", zoom) else "${p.toInt()}×"
+            Box(
+                Modifier
+                    .size(if (active) 44.dp else 38.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .border(if (active) 1.5.dp else 0.dp, if (active) Accent else Color.Transparent, CircleShape)
+                    .clickable { onZoom(p) },
+                contentAlignment = Alignment.Center,
+            ) {
+                BasicText(
+                    label,
+                    style = TextStyle(color = if (active) Accent else Color.White, fontSize = if (active) 13.sp else 12.sp, fontWeight = FontWeight.SemiBold),
+                    modifier = Modifier.rotate(rotation),
+                )
+            }
+        }
+    }
+    if (vertical) {
+        Column(modifier, verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.CenterHorizontally) { content() }
+    } else {
+        Row(modifier, horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) { content() }
     }
 }
 

@@ -519,6 +519,34 @@ void main() {
 }
 """
 
+    /** Zoom: a centred crop of the tone-mapped image, scaled with Catmull-Rom (bicubic) weights. */
+    val UPSCALE = GRID + """
+layout(rgba8, binding = 0) readonly uniform image2D uSrc;
+layout(rgba8, binding = 1) writeonly uniform image2D uDst;
+uniform vec2 uOrigin;
+uniform float uScale;
+vec4 w4(float t) {
+    float t2 = t * t, t3 = t2 * t;
+    return vec4(-0.5 * t3 + t2 - 0.5 * t, 1.5 * t3 - 2.5 * t2 + 1.0, -1.5 * t3 + 2.0 * t2 + 0.5 * t, 0.5 * t3 - 0.5 * t2);
+}
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(uDst)))) return;
+    ivec2 lim = imageSize(uSrc) - 1;
+    vec2 src = uOrigin + (vec2(p) + 0.5) / uScale - 0.5;
+    ivec2 i0 = ivec2(floor(src));
+    vec2 f = src - vec2(i0);
+    vec4 wx = w4(f.x), wy = w4(f.y);
+    vec3 acc = vec3(0.0);
+    for (int y = 0; y < 4; y++) {
+        vec3 row = vec3(0.0);
+        for (int x = 0; x < 4; x++) row += wx[x] * imageLoad(uSrc, clamp(i0 + ivec2(x - 1, y - 1), ivec2(0), lim)).rgb;
+        acc += wy[y] * row;
+    }
+    imageStore(uDst, p, vec4(clamp(acc, 0.0, 1.0), 1.0));
+}
+"""
+
     /**
      * Upright RGBA → NV21 for the JPEG encoder (full-range BT.601, as JFIF). Images cannot be
      * single-byte in ES 3.1, so four luma bytes (or two V,U pairs) are packed in one RGBA8 texel.
@@ -560,9 +588,10 @@ layout(rgba8, binding = 1) writeonly uniform image2D uDst;
 uniform int uRot;
 uniform float uAmount;
 uniform int uCrop;
+uniform ivec2 uOutSize;
 void main() {
     ivec2 o = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 size = imageSize(uSrc) - 2 * uCrop;
+    ivec2 size = uOutSize;
     if (any(greaterThanEqual(o, size))) return;
     ivec2 p = o + ivec2(uCrop);
     ivec2 s = imageSize(uSrc) - 1;

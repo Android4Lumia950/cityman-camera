@@ -48,6 +48,8 @@ data class BurstSetup(
     val frames: Int = 8,
     /** How far the burst was under-exposed (EV): high in backlit scenes, which get more tone compression. */
     val underEv: Float = 0.7f,
+    /** Viewfinder zoom at capture: the photo is the centred crop, doubled from 1.5× up. */
+    val zoom: Float = 1f,
 )
 
 /**
@@ -443,23 +445,47 @@ class MultiFrameProcessor {
         ref?.release(); ref = null
         spare?.release(); spare = null
 
+        // Zoom: centred crop, scaled ×2 from 1.5× (sizes kept to multiples of 8 for NV21).
+        var src = tone
+        var srcCrop = s.crop
+        if (s.zoom > 1.01f) {
+            val baseW = s.width - 2 * s.crop
+            val baseH = s.height - 2 * s.crop
+            val scale = if (s.zoom >= 1.5f) 2f else 1f
+            val cropW = (baseW / s.zoom).toInt()
+            val cropH = (baseH / s.zoom).toInt()
+            val upW = (cropW * scale).toInt() / 8 * 8
+            val upH = (cropH * scale).toInt() / 8 * 8
+            val up = Tex(upW, upH, GLES31.GL_RGBA8)
+            val p = program("upscale", Shaders.UPSCALE)
+            p.use()
+            tone.bindImage(0, GLES31.GL_READ_ONLY)
+            up.bindImage(1, GLES31.GL_WRITE_ONLY)
+            p.set("uOrigin", (s.width - upW / scale) / 2f, (s.height - upH / scale) / 2f)
+            p.set("uScale", scale)
+            p.dispatch(upW, upH)
+            tone.release()
+            src = up
+            srcCrop = 0
+        }
         val rotated = s.rotation == 90 || s.rotation == 270
-        val cw = s.width - 2 * s.crop
-        val chh = s.height - 2 * s.crop
+        val cw = (src.width - 2 * srcCrop) / 8 * 8
+        val chh = (src.height - 2 * srcCrop) / 8 * 8
         val ow = if (rotated) chh else cw
         val oh = if (rotated) cw else chh
         val out = Tex(ow, oh, GLES31.GL_RGBA8)
         run {
             val p = program("sharpen", Shaders.SHARPEN)
             p.use()
-            tone.bindImage(0, GLES31.GL_READ_ONLY)
+            src.bindImage(0, GLES31.GL_READ_ONLY)
             out.bindImage(1, GLES31.GL_WRITE_ONLY)
             p.set("uRot", s.rotation)
             p.set("uAmount", if (o.sharpen) 0.55f else 0f)
-            p.set("uCrop", s.crop)
+            p.set("uCrop", srcCrop)
+            p.setI("uOutSize", cw, chh)
             p.dispatch(cw, chh)
         }
-        tone.release()
+        src.release()
 
         // NV21 for the encoder (less to read back than RGBA), and a small bitmap for the thumbnail.
         val yTex = Tex(ow / 4, oh, GLES31.GL_RGBA8)

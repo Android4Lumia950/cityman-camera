@@ -40,6 +40,7 @@ object DebugCommands {
         if (extras.containsKey("zsl")) controller.zslProbe = extras.getBoolean("zsl")
         if (extras.containsKey("timelapse")) controller.setTimelapse(extras.getInt("timelapse"))
         if (extras.containsKey("stabilise")) controller.setStabilise(extras.getBoolean("stabilise"))
+        if (extras.containsKey("zoom")) controller.setZoom(extras.getFloat("zoom"))
         if (extras.getBoolean("switch")) controller.switchCamera()
         if (extras.getBoolean("shoot")) controller.shutter()
     }
