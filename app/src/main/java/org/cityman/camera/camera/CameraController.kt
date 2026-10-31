@@ -953,9 +953,12 @@ class CameraController(private val context: Context) {
             val ev = 2.0.pow(m.evSteps * c.evStep.toDouble())
             val product = autoIso.toDouble() * autoExposureNs * ev
             val target = product * 2.0.pow(-BURST_UNDER_EV)
-            // Shortest shutter that reaches the target at the highest manual ISO, between 1/15 s and,
-            // in low light, 1/6 s (the rear lens is stabilised); below that, digital gain.
-            val atMaxIso = (target / isoRange.upper).toLong()
+            // Short frames keep hand shake out of each frame (merging takes care of the noise):
+            // 1/30 s, longer only once ISO is at its maximum, up to 1/10 s (the rear lens is
+            // stabilised); below that, digital gain.
+            // Manual ISO stops at the sensor's analogue maximum (342 here, the HAL clamps higher
+            // values); up to 2× digital gain after the merge costs less than hand shake.
+            val atMaxIso = (target / (isoRange.upper * BURST_DIGITAL_GAIN_FIRST)).toLong()
             val cap = atMaxIso.coerceIn(BURST_MAX_SHUTTER_NS, BURST_LOW_LIGHT_SHUTTER_NS)
             val exp = (target / isoRange.lower).toLong().coerceIn(expRange.lower, min(cap, expRange.upper))
             val i = (target / exp).roundToInt().coerceIn(isoRange.lower, isoRange.upper)
@@ -1279,8 +1282,9 @@ class CameraController(private val context: Context) {
         private const val MAX_AUTO_SHUTTER_NS = 250_000_000L
         private const val MAX_BURST = 8
         private const val BURST_UNDER_EV = 0.7
-        private const val BURST_MAX_SHUTTER_NS = 66_666_666L
-        private const val BURST_LOW_LIGHT_SHUTTER_NS = 166_666_666L
+        private const val BURST_MAX_SHUTTER_NS = 33_333_333L
+        private const val BURST_LOW_LIGHT_SHUTTER_NS = 100_000_000L
+        private const val BURST_DIGITAL_GAIN_FIRST = 2.0
 
         fun exifOrientation(degrees: Int) = when (degrees) {
             90 -> ExifInterface.ORIENTATION_ROTATE_90

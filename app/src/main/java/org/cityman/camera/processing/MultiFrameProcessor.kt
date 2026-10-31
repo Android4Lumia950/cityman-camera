@@ -400,6 +400,7 @@ class MultiFrameProcessor {
             p.set("uL2", if (i == 0) 0 else 1)
             // The finest level scores every other pixel: a quarter of the reads, same accuracy.
             p.set("uStep", if (i == 0) 2 else 1)
+            p.set("uSub", if (i == 0) 1 else 0)
             p.dispatch(align[i].width, align[i].height)
         }
     }
@@ -438,7 +439,7 @@ class MultiFrameProcessor {
         decision!!.bindImage(3, GLES31.GL_WRITE_ONLY)
         d.set("uTile", LEVELS[0].tile)
         d.set("uNoise", noise[0], noise[1])
-        d.set("uStrength", 0.9f)
+        d.set("uStrength", 0.8f)
         d.dispatch(decision!!.width, decision!!.height)
 
         val a = program("mergeAdd", Shaders.MERGE_ADD)

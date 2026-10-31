@@ -115,13 +115,16 @@ of RAW frames and merges them on the GPU (OpenGL ES 3.1 compute shaders, `proces
 20 MP JPEG (`IMG_…_MF.jpg`) from the full 5344×3744 sensor, instead of the HAL's 13 MP JPEG.
 
 1. **Exposure plan** (`CameraController.burstPlan`): 0.7 EV under what auto exposure measured,
-   to keep highlights; shutter at most 1/15 s, up to 1/6 s in low light (the rear lens has OIS);
-   ISO within the HAL's manual range (42–342 on the rear camera); whatever is missing becomes
-   digital gain after the merge. 6 frames, 8 in low light (or 4/6/8 from the settings). With
+   to keep highlights; short frames against hand shake: 1/30 s, and longer (up to 1/10 s, the
+   rear lens has OIS) only once ISO is at its manual maximum and 2× digital gain would not be
+   enough. The HAL clamps manual ISO at 342 on the rear camera (auto exposure reaches ~1800 with
+   ISP digital gain), so whatever is missing becomes digital gain after the merge, where the
+   noise is lower. 6 frames, 8 in low light (or 4/6/8 from the settings). With
    manual ISO or shutter set, the burst uses those values.
 2. **Merge**, frame by frame as they arrive (memory stays constant): black level, Bayer 2×2
    blocks packed into one texel; grey pyramid (½, ¼, ¼); coarse-to-fine tile alignment (tiles
-   16/8 px, L1 at the finest level, L2 above); per 2×2 block, choice between the tile's offset and
+   16/8 px, L1 at the finest level, L2 above), with a sub-pixel refinement at the finest level
+   (parabola through the costs) and bilinear sampling of each colour plane; per 2×2 block, choice between the tile's offset and
    the two nearest tiles' offsets, and a robustness weight from the local difference against the
    noise expected at that brightness; weighted accumulation against the first frame.
 3. **Noise model**: measured on every burst from the first aligned pair (median absolute

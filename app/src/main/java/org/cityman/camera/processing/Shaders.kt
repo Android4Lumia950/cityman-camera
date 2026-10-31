@@ -82,6 +82,7 @@ uniform int uFactor;
 uniform int uPrevTile;
 uniform int uL2;
 uniform int uStep;
+uniform int uSub;
 void main() {
     ivec2 t = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(t, imageSize(uOut)))) return;
@@ -95,6 +96,7 @@ void main() {
     }
     float best = 3.0e38;
     ivec2 bestD = init;
+    float cs[9];
     for (int dy = -uRadius; dy <= uRadius; dy++) {
         for (int dx = -uRadius; dx <= uRadius; dx++) {
             ivec2 d = init + ivec2(dx, dy);
@@ -106,11 +108,21 @@ void main() {
                     cost += (uL2 == 1) ? e * e : abs(e);
                 }
             }
+            if (uRadius == 1) cs[(dy + 1) * 3 + dx + 1] = cost;
             // Prefer no extra motion on ties (flat areas).
             if (cost < best - 1.0e-6 || (dx == 0 && dy == 0 && cost <= best)) { best = cost; bestD = d; }
         }
     }
-    imageStore(uOut, t, ivec4(bestD, 0, 0));
+    ivec2 sub = ivec2(0);
+    if (uSub == 1 && uRadius == 1 && bestD == init) {
+        // Parabola through the costs left/centre/right (and up/centre/down): sub-pixel offset.
+        float dxx = cs[3] - 2.0 * cs[4] + cs[5];
+        float dyy = cs[1] - 2.0 * cs[4] + cs[7];
+        float sx = dxx > 1.0e-9 ? clamp(0.5 * (cs[3] - cs[5]) / dxx, -0.5, 0.5) : 0.0;
+        float sy = dyy > 1.0e-9 ? clamp(0.5 * (cs[1] - cs[7]) / dyy, -0.5, 0.5) : 0.0;
+        sub = ivec2(round(vec2(sx, sy) * 256.0));
+    }
+    imageStore(uOut, t, ivec4(bestD, sub));
 }
 """
 
@@ -185,22 +197,23 @@ void main() {
     ivec2 within = c - tile * uTile;
     ivec2 tx = clamp(tile + ivec2(within.x < uTile / 2 ? -1 : 1, 0), ivec2(0), nt);
     ivec2 ty = clamp(tile + ivec2(0, within.y < uTile / 2 ? -1 : 1), ivec2(0), nt);
-    ivec2 o0 = imageLoad(uAlign, tile).xy;
-    ivec2 o1 = imageLoad(uAlign, tx).xy;
-    ivec2 o2 = imageLoad(uAlign, ty).xy;
+    ivec4 a0 = imageLoad(uAlign, tile);
+    ivec4 a1 = imageLoad(uAlign, tx);
+    ivec4 a2 = imageLoad(uAlign, ty);
+    ivec2 o0 = a0.xy, o1 = a1.xy, o2 = a2.xy;
     float s0 = sad(p0, o0, sz);
     float s1 = (o1 == o0) ? s0 : sad(p0, o1, sz);
     float s2 = (o2 == o0 || o2 == o1) ? s0 : sad(p0, o2, sz);
-    ivec2 o = o0;
+    vec2 o = vec2(o0) + vec2(a0.zw) / 256.0;
     float s = s0;
-    if (s1 < s) { s = s1; o = o1; }
-    if (s2 < s) { s = s2; o = o2; }
+    if (s1 < s) { s = s1; o = vec2(o1) + vec2(a1.zw) / 256.0; }
+    if (s2 < s) { s = s2; o = vec2(o2) + vec2(a2.zw) / 256.0; }
     float x = max(0.25 * (r[5] + r[6] + r[9] + r[10]), 0.0);
     float sigma = sqrt(uNoise.x * x + uNoise.y);
     // Grey averages four samples, so its noise is half the per-channel sigma.
     float dn = s / (0.5 * sigma);
-    float w = exp(-pow(max(dn - 1.4, 0.0) / uStrength, 2.0));
-    imageStore(uDec, b, vec4(vec2(o), w, 0.0));
+    float w = exp(-pow(max(dn - 1.3, 0.0) / uStrength, 2.0));
+    imageStore(uDec, b, vec4(o, w, 0.0));
 }
 """
 
@@ -216,9 +229,15 @@ void main() {
     ivec2 size = imageSize(uAlt);
     if (any(greaterThanEqual(p, size))) return;
     vec4 d = imageLoad(uDec, p / 2);
-    ivec2 o = ivec2(round(d.xy));
     float w = d.z;
-    vec4 a = imageLoad(uAlt, clamp(p + o, ivec2(0), size - 1));
+    // Bilinear between quad pixels: each colour plane is a regular grid, so this keeps the
+    // pattern while following sub-pixel motion.
+    vec2 q = vec2(p) + d.xy;
+    ivec2 i0 = ivec2(floor(q));
+    vec2 f = q - vec2(i0);
+    ivec2 m = size - 1;
+    vec4 a = mix(mix(imageLoad(uAlt, clamp(i0, ivec2(0), m)), imageLoad(uAlt, clamp(i0 + ivec2(1, 0), ivec2(0), m)), f.x),
+                 mix(imageLoad(uAlt, clamp(i0 + ivec2(0, 1), ivec2(0), m)), imageLoad(uAlt, clamp(i0 + ivec2(1, 1), ivec2(0), m)), f.x), f.y);
     imageStore(uAccOut, p, imageLoad(uAccIn, p) + w * a);
     imageStore(uW, p, vec4(imageLoad(uW, p).r + w));
 }
