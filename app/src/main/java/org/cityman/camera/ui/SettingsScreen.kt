@@ -64,6 +64,7 @@ fun SettingsScreen(
     BackHandler(onBack = onClose)
     val titles = listOf(
         stringResource(R.string.page_photo),
+        stringResource(R.string.page_video),
         stringResource(R.string.page_processing),
         stringResource(R.string.page_general),
     )
@@ -102,7 +103,8 @@ fun SettingsScreen(
             ) {
                 when (page) {
                     0 -> PhotoPage(controller, state)
-                    1 -> ProcessingPage(controller, state)
+                    1 -> VideoPage(controller, state)
+                    2 -> ProcessingPage(controller, state)
                     else -> GeneralPage(controller, state, galleryApps)
                 }
             }
@@ -157,6 +159,25 @@ private fun PhotoPage(controller: CameraController, state: CameraState) {
     }
     Toggle(stringResource(R.string.settings_peaking), null, state.peaking) {
         controller.setAnalysisTools(state.showHistogram, state.zebra, it)
+    }
+}
+
+@Composable
+private fun VideoPage(controller: CameraController, state: CameraState) {
+    BasicText(stringResource(R.string.video_info), style = DescStyle)
+    Choice(
+        title = stringResource(R.string.settings_timelapse),
+        desc = stringResource(R.string.settings_timelapse_desc),
+        options = listOf(0 to stringResource(R.string.settings_off), 5 to "5×", 10 to "10×", 30 to "30×"),
+        selected = state.timelapse,
+        horizontal = true,
+        onSelect = { controller.setTimelapse(it) },
+    )
+    Toggle(stringResource(R.string.settings_stabilise), stringResource(R.string.settings_stabilise_desc), state.stabilise) {
+        controller.setStabilise(it)
+    }
+    Toggle(stringResource(R.string.settings_sound), stringResource(R.string.settings_sound_desc), state.shutterSound) {
+        controller.setShutterSound(it)
     }
 }
 

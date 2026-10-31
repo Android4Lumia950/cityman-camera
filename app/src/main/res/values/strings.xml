@@ -62,4 +62,10 @@
     <string name="settings_accent_desc">Use the colour of Android\'s theme (from the wallpaper). Off: amber.</string>
     <string name="settings_level">Level</string>
     <string name="settings_level_desc">A horizon line that turns to the accent colour when the photo is straight.</string>
+    <string name="page_video">video</string>
+    <string name="settings_timelapse">Time-lapse</string>
+    <string name="settings_timelapse_desc">Keeps one frame in 5, 10 or 30 and plays them at 30 fps, without sound.</string>
+    <string name="settings_stabilise">Stabilisation</string>
+    <string name="settings_stabilise_desc">Experimental: steadies the video with the gyroscope, cropping 10 % of the frame.</string>
+    <string name="video_info">H.264 with AAC sound: 1080p at 20 Mbit/s on the rear camera, 720p on the front. The AE badge locks exposure and white balance.</string>
 </resources>

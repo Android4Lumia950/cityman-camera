@@ -183,6 +183,13 @@ fun CameraScreen(
                 )
             }
             if (st.saveDng && st.mode == CaptureMode.PHOTO && !st.multiFrame) Badge("RAW")
+            // Exposure / white balance lock, both modes.
+            Badge(
+                "AE",
+                on = st.aeLock,
+                modifier = Modifier.clip(RoundedCornerShape(4.dp)).clickable { controller.setAeLock(!st.aeLock) },
+            )
+            if (st.mode == CaptureMode.VIDEO && st.timelapse > 1) Badge("${st.timelapse}×")
             if (st.multiFrame && st.still && st.mode == CaptureMode.PHOTO) Badge(stringResource(R.string.badge_still))
             if (st.zoom > 1.01f) Badge(String.format(Locale.US, "%.1f×", st.zoom))
             if (st.focusPoint != null) Badge(stringResource(R.string.badge_locked))
@@ -246,6 +253,8 @@ fun CameraScreen(
         ) {
             QuickPanel(
                 state = st,
+                onTimelapse = { controller.setTimelapse(it) },
+                onStabilise = { controller.setStabilise(it) },
                 onGrid = { controller.setGrid(it) },
                 onDng = { controller.setSaveDng(it) },
                 onMultiFrame = { controller.setMultiFrame(it) },
@@ -625,6 +634,8 @@ private fun RecordingTimer(since: Long, modifier: Modifier) {
 @Composable
 private fun QuickPanel(
     state: CameraState,
+    onTimelapse: (Int) -> Unit,
+    onStabilise: (Boolean) -> Unit,
     onGrid: (Boolean) -> Unit,
     onDng: (Boolean) -> Unit,
     onMultiFrame: (Boolean) -> Unit,
@@ -653,6 +664,18 @@ private fun QuickPanel(
                 titleStyle = title,
                 onSelect = onTimer,
             )
+        }
+        if (!photo) {
+            Choice(
+                title = stringResource(R.string.settings_timelapse),
+                desc = null,
+                options = listOf(0 to stringResource(R.string.settings_off), 5 to "5×", 10 to "10×", 30 to "30×"),
+                selected = state.timelapse,
+                horizontal = true,
+                titleStyle = title,
+                onSelect = onTimelapse,
+            )
+            Toggle(stringResource(R.string.settings_stabilise), null, state.stabilise, titleStyle = title) { onStabilise(it) }
         }
         Toggle(stringResource(R.string.settings_grid), null, state.grid, titleStyle = title) { onGrid(it) }
         if (photo && raw) Toggle(stringResource(R.string.settings_dng_short), null, state.saveDng, titleStyle = title) { onDng(it) }

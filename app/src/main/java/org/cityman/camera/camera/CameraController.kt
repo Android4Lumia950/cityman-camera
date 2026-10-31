@@ -72,6 +72,11 @@ data class CameraState(
     /** The phone is resting: multi-frame photos use the long night exposures. */
     val still: Boolean = false,
     val showHistogram: Boolean = false,
+    /** Exposure and white balance locked (auto exposure keeps its current values). */
+    val aeLock: Boolean = false,
+    /** Video: time-lapse factor (0 = off) and electronic stabilisation. */
+    val timelapse: Int = 0,
+    val stabilise: Boolean = false,
     /** Launched from the lock screen: only this session's photos may be shown. */
     val secure: Boolean = false,
     val level: Boolean = false,
@@ -137,6 +142,8 @@ class CameraController(private val context: Context) {
             format = runCatching { PhotoFormat.valueOf(prefs.getString("format", null) ?: "FULL") }.getOrDefault(PhotoFormat.FULL),
             multiFrame = prefs.getBoolean("mf", false),
             showHistogram = prefs.getBoolean("histogram", false),
+            timelapse = prefs.getInt("timelapse", 0),
+            stabilise = prefs.getBoolean("stabilise", false),
             level = prefs.getBoolean("level", false),
             mode = if (prefs.getString("mode", null) == "VIDEO") CaptureMode.VIDEO else CaptureMode.PHOTO,
             cameraIndex = prefs.getInt("camera", 0),
@@ -286,6 +293,7 @@ class CameraController(private val context: Context) {
         _state.update {
             it.copy(
                 cameraIndex = ((it.cameraIndex + 1) % cameraIds.size).also { i -> prefs.edit().putInt("camera", i).apply() },
+                aeLock = false,
                 controls = controls, zoom = 1f, focusPoint = null, live = LiveValues(),
             )
         }
@@ -472,6 +480,21 @@ class CameraController(private val context: Context) {
     private fun stopTilt() {
         sensors?.unregisterListener(tiltListener)
         _tilt.value = null
+    }
+
+    fun setAeLock(on: Boolean) = camHandler.post {
+        _state.update { it.copy(aeLock = on) }
+        startRepeating()
+    }
+
+    fun setTimelapse(factor: Int) {
+        prefs.edit().putInt("timelapse", factor).apply()
+        _state.update { it.copy(timelapse = factor) }
+    }
+
+    fun setStabilise(on: Boolean) {
+        prefs.edit().putBoolean("stabilise", on).apply()
+        _state.update { it.copy(stabilise = on) }
     }
 
     fun setSystemAccent(on: Boolean) {
@@ -746,6 +769,7 @@ class CameraController(private val context: Context) {
         b.addTarget(surface)
         if (recording) video?.let { b.addTarget(it.reader.surface) }
         if (_state.value.mode == CaptureMode.PHOTO && session != null) analyzer?.let { b.addTarget(it.reader.surface) }
+        if (zslProbe && _state.value.mode == CaptureMode.PHOTO) rawReader?.let { b.addTarget(it.surface) }
         applyControls(b, still = false)
         return b
     }
@@ -824,6 +848,7 @@ class CameraController(private val context: Context) {
             b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
             b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, m.evSteps.coerceIn(c.evRange.lower, c.evRange.upper))
             c.fpsRange(video)?.let { b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
+            if (_state.value.aeLock) b.set(CaptureRequest.CONTROL_AE_LOCK, true)
             meterRegion?.let { b.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(it)) }
         } else {
             val (iso, exposure) = manualExposure(c, m)
@@ -844,6 +869,7 @@ class CameraController(private val context: Context) {
             b.set(CaptureRequest.COLOR_CORRECTION_TRANSFORM, corr.transform)
         } else {
             b.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
+            if (_state.value.aeLock) b.set(CaptureRequest.CONTROL_AWB_LOCK, true)
         }
 
         b.set(CaptureRequest.SCALER_CROP_REGION, cropRegion(c))
@@ -898,8 +924,25 @@ class CameraController(private val context: Context) {
 
     // ---- results ------------------------------------------------------------------------
 
+    /** Debug: RAW in every viewfinder frame, to measure whether zero shutter lag is possible. */
+    @Volatile var zslProbe = false
+        set(value) {
+            field = value
+            camHandler.post { startRepeating() }
+        }
+    private var probeLast = 0L
+    private var probeCount = 0
+    private var probeSum = 0L
+
     private val repeatingCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+            val ts = result[CaptureResult.SENSOR_TIMESTAMP] ?: 0L
+            if (probeLast != 0L) { probeSum += ts - probeLast; probeCount++ }
+            probeLast = ts
+            if (probeCount == 40) {
+                Log.i(TAG, "viewfinder ${String.format(java.util.Locale.US, "%.1f", 1e9 * probeCount / probeSum)} fps (raw in repeating: $zslProbe)")
+                probeCount = 0; probeSum = 0
+            }
             val iso = result[CaptureResult.SENSOR_SENSITIVITY]
             val exp = result[CaptureResult.SENSOR_EXPOSURE_TIME]
             if (result[CaptureResult.CONTROL_AE_MODE] == CameraMetadata.CONTROL_AE_MODE_ON && iso != null && exp != null && iso > 0 && exp > 0) {
@@ -1268,6 +1311,7 @@ class CameraController(private val context: Context) {
             val w = kotlin.math.sqrt((e.values[0] * e.values[0] + e.values[1] * e.values[1] + e.values[2] * e.values[2]).toDouble())
             // Mean over about 0.4 s at 50 Hz: the hand's tremor, not the peak of the tap.
             gyroRate = if (gyroSamples == 0) w else gyroRate * 0.95 + w * 0.05
+            video?.addGyro(e.timestamp, e.values[0], e.values[1], e.values[2])
             gyroSamples++
             if (w > gyroMaxSeen) gyroMaxSeen = w
             val now = SystemClock.elapsedRealtime()
@@ -1530,15 +1574,17 @@ class CameraController(private val context: Context) {
         val fps = c.fpsRange(video = true)?.upper ?: 30
         val r = MediaRecorder(context)
         try {
-            if (audio) r.setAudioSource(MediaRecorder.AudioSource.CAMCORDER)
+            val lapse = _state.value.timelapse
+            val withAudio = audio && lapse <= 1
+            if (withAudio) r.setAudioSource(MediaRecorder.AudioSource.CAMCORDER)
             r.setVideoSource(MediaRecorder.VideoSource.SURFACE)
             r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             r.setOutputFile(fd.fileDescriptor)
             r.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
             r.setVideoEncodingBitRate(if (size.width >= 1920) 20_000_000 else 10_000_000)
-            r.setVideoFrameRate(fps)
+            r.setVideoFrameRate(if (lapse > 1) 30 else fps)
             r.setVideoSize(size.width, size.height)
-            if (audio) {
+            if (withAudio) {
                 r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                 r.setAudioEncodingBitRate(192_000)
                 r.setAudioSamplingRate(48_000)
@@ -1546,7 +1592,15 @@ class CameraController(private val context: Context) {
             r.setOrientationHint(jpegOrientation(c))
             r.prepare()
             r.start()
-            vp.attach(r.surface)
+            vp.attach(
+                r.surface,
+                VideoPipeline.Options(
+                    every = _state.value.timelapse.coerceAtLeast(1),
+                    stabilise = _state.value.stabilise,
+                    sensorOrientation = c.sensorOrientation,
+                    front = c.front,
+                ),
+            )
         } catch (e: Exception) {
             Log.e(TAG, "start recording", e)
             runCatching { vp.detach() }

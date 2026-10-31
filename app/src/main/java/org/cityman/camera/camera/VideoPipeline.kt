@@ -44,6 +44,19 @@ class VideoPipeline(val size: Size) {
     @Volatile var framesDrawn = 0
         private set
 
+    /** How a recording is drawn: time-lapse factor (1 = real time) and stabilisation. */
+    class Options(val every: Int = 1, val stabilise: Boolean = false, val sensorOrientation: Int = 90, val front: Boolean = false)
+
+    private var options = Options()
+    private var frameIndex = 0
+    private var firstPts = 0L
+    private val stabiliser = Stabiliser()
+
+    /** Gyroscope sample (SystemClock.elapsedRealtimeNanos time base), for stabilisation. */
+    fun addGyro(timestampNs: Long, wx: Float, wy: Float, wz: Float) {
+        if (options.stabilise) handler.post { stabiliser.addGyro(timestampNs, wx, wy, wz) }
+    }
+
     init {
         runAndWait { setupGl() }
         reader.setOnImageAvailableListener({ r ->
@@ -53,7 +66,11 @@ class VideoPipeline(val size: Size) {
                 null
             } ?: return@setOnImageAvailableListener
             try {
-                if (target != EGL14.EGL_NO_SURFACE) draw(image)
+                stabiliser.noteFrameArrival(image.timestamp, android.os.SystemClock.elapsedRealtimeNanos())
+                if (target != EGL14.EGL_NO_SURFACE) {
+                    frameIndex++
+                    if ((frameIndex - 1) % options.every == 0) draw(image)
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "video frame", e)
             } finally {
@@ -63,7 +80,11 @@ class VideoPipeline(val size: Size) {
     }
 
     /** Starts drawing into [surface] (the recorder's input surface). */
-    fun attach(surface: Surface) = runAndWait {
+    fun attach(surface: Surface, opts: Options = Options()) = runAndWait {
+        options = opts
+        frameIndex = 0
+        firstPts = 0L
+        stabiliser.reset()
         target = EGL14.eglCreateWindowSurface(display, config, surface, intArrayOf(EGL14.EGL_NONE), 0)
         check(target != EGL14.EGL_NO_SURFACE) { "eglCreateWindowSurface failed" }
         framesDrawn = 0
@@ -182,12 +203,23 @@ class VideoPipeline(val size: Size) {
         GLES30.glUniform1i(GLES30.glGetUniformLocation(program, "uY"), 0)
         GLES30.glUniform1i(GLES30.glGetUniformLocation(program, "uUv"), 1)
         GLES30.glUniform1i(GLES30.glGetUniformLocation(program, "uVFirst"), if (vFirst) 1 else 0)
+        // Stabilisation: crop 10 % and move/rotate the crop against the shake.
+        val t = if (options.stabilise) stabiliser.transform(image.timestamp, w, h, options.sensorOrientation, options.front) else null
+        GLES30.glUniform2f(GLES30.glGetUniformLocation(program, "uSize"), w.toFloat(), h.toFloat())
+        GLES30.glUniform1f(GLES30.glGetUniformLocation(program, "uScale"), if (t != null) 0.9f else 1f)
+        GLES30.glUniform1f(GLES30.glGetUniformLocation(program, "uRot"), t?.rotation ?: 0f)
+        GLES30.glUniform2f(GLES30.glGetUniformLocation(program, "uShift"), t?.dx ?: 0f, t?.dy ?: 0f)
         val q = quad!!
         q.position(0)
         GLES30.glEnableVertexAttribArray(0)
         GLES30.glVertexAttribPointer(0, 2, GLES30.GL_FLOAT, false, 8, q)
         GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
-        EGLExt.eglPresentationTimeANDROID(display, target, image.timestamp)
+        // Time-lapse: frames spaced at 1/30 s whatever their real spacing.
+        val pts = if (options.every > 1) {
+            if (firstPts == 0L) firstPts = image.timestamp
+            firstPts + framesDrawn * 33_333_333L
+        } else image.timestamp
+        EGLExt.eglPresentationTimeANDROID(display, target, pts)
         EGL14.eglSwapBuffers(display, target)
         framesDrawn++
     }
@@ -269,6 +301,99 @@ class VideoPipeline(val size: Size) {
         return p
     }
 
+    /**
+     * Electronic stabilisation from the gyroscope: integrates the rotation, follows it with a
+     * smooth path, and returns how far the frame content moved away from that path.
+     */
+    private class Stabiliser {
+        private val times = LongArray(512)
+        private val ax = FloatArray(512)
+        private val ay = FloatArray(512)
+        private val az = FloatArray(512)
+        private var count = 0
+        private var head = 0
+        private var lastT = 0L
+        private var angX = 0f
+        private var angY = 0f
+        private var angZ = 0f
+        private var offset = Long.MAX_VALUE
+        private var smoothX = 0f
+        private var smoothY = 0f
+        private var smoothZ = 0f
+        private var lastFrame = 0L
+
+        class Transform(val dx: Float, val dy: Float, val rotation: Float)
+
+        fun reset() {
+            count = 0; head = 0; lastT = 0L; angX = 0f; angY = 0f; angZ = 0f
+            offset = Long.MAX_VALUE; lastFrame = 0L
+        }
+
+        fun addGyro(t: Long, wx: Float, wy: Float, wz: Float) {
+            if (lastT != 0L) {
+                val dt = (t - lastT) / 1e9f
+                if (dt in 0f..0.1f) { angX += wx * dt; angY += wy * dt; angZ += wz * dt }
+            }
+            lastT = t
+            times[head] = t; ax[head] = angX; ay[head] = angY; az[head] = angZ
+            head = (head + 1) % times.size
+            if (count < times.size) count++
+        }
+
+        /** The camera clock has an unknown base: the smallest arrival delay gives the offset. */
+        fun noteFrameArrival(frameTs: Long, nowElapsed: Long) {
+            val d = nowElapsed - frameTs
+            if (d < offset) offset = d
+        }
+
+        private fun anglesAt(t: Long): FloatArray? {
+            if (count < 2) return null
+            var best = -1
+            for (k in 0 until count) {
+                val i = (head - 1 - k + times.size) % times.size
+                if (times[i] <= t) { best = i; break }
+            }
+            if (best < 0) return null
+            return floatArrayOf(ax[best], ay[best], az[best])
+        }
+
+        fun transform(frameTs: Long, w: Int, h: Int, sensorOrientation: Int, front: Boolean): Transform? {
+            if (offset == Long.MAX_VALUE) return null
+            val a = anglesAt(frameTs + offset) ?: return null
+            if (lastFrame == 0L) { smoothX = a[0]; smoothY = a[1]; smoothZ = a[2] }
+            val dt = if (lastFrame == 0L) 0f else ((frameTs - lastFrame) / 1e9f).coerceIn(0f, 0.2f)
+            lastFrame = frameTs
+            val k = 1f - kotlin.math.exp(-dt / 0.6f)
+            smoothX += (a[0] - smoothX) * k
+            smoothY += (a[1] - smoothY) * k
+            smoothZ += (a[2] - smoothZ) * k
+            var dX = a[0] - smoothX
+            var dY = a[1] - smoothY
+            val dZ = a[2] - smoothZ
+            // Scene displacement in the phone's screen plane (x right, y up), in pixels.
+            val f = w / 1.4f
+            val sx = if (front) -f * dY else f * dY
+            val sy = if (front) f * dX else -f * dX
+            // Screen plane → frame axes for this sensor orientation.
+            val th = Math.toRadians(sensorOrientation.toDouble())
+            val upX = (-kotlin.math.sin(th)).toFloat()
+            val upY = kotlin.math.cos(th).toFloat()
+            val rightX = upY
+            val rightY = -upX
+            var px = sx * rightX + sy * rightY
+            var py = -(sx * upX + sy * upY)
+            // Stay inside the 10 % crop margin.
+            val mx = w * 0.05f
+            val my = h * 0.05f
+            if (kotlin.math.abs(px) > mx || kotlin.math.abs(py) > my) {
+                val sc = minOf(mx / kotlin.math.abs(px).coerceAtLeast(1e-3f), my / kotlin.math.abs(py).coerceAtLeast(1e-3f))
+                px *= sc; py *= sc
+            }
+            val rot = if (front) -dZ else dZ
+            return Transform(px, py, rot.coerceIn(-0.05f, 0.05f))
+        }
+    }
+
     companion object {
         private const val TAG = "ArcoVideo"
         private const val EGL_RECORDABLE_ANDROID = 0x3142
@@ -276,9 +401,17 @@ class VideoPipeline(val size: Size) {
         private const val VERTEX = """#version 300 es
 in vec2 aPos;
 out vec2 vUv;
+uniform vec2 uSize;
+uniform float uScale;
+uniform float uRot;
+uniform vec2 uShift;
 void main() {
-    // Image row 0 at the top of the encoded frame.
-    vUv = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+    // Image row 0 at the top of the encoded frame; source position = crop, rotation and shift
+    // (in pixels, rows downwards) of the output position.
+    vec2 p = vec2(aPos.x, -aPos.y) * 0.5 * uSize * uScale;
+    float c = cos(uRot), s = sin(uRot);
+    p = vec2(c * p.x - s * p.y, s * p.x + c * p.y) + uShift;
+    vUv = p / uSize + 0.5;
     gl_Position = vec4(aPos, 0.0, 1.0);
 }
 """

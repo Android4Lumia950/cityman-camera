@@ -37,6 +37,9 @@ object DebugCommands {
             val t = extras.getString("tools") ?: ""
             controller.setAnalysisTools("h" in t, "z" in t, "p" in t)
         }
+        if (extras.containsKey("zsl")) controller.zslProbe = extras.getBoolean("zsl")
+        if (extras.containsKey("timelapse")) controller.setTimelapse(extras.getInt("timelapse"))
+        if (extras.containsKey("stabilise")) controller.setStabilise(extras.getBoolean("stabilise"))
         if (extras.getBoolean("switch")) controller.switchCamera()
         if (extras.getBoolean("shoot")) controller.shutter()
     }

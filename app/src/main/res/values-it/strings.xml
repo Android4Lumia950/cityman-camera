@@ -61,4 +61,10 @@
     <string name="settings_accent_desc">Usa il colore del tema di Android (dallo sfondo). Spento: ambra.</string>
     <string name="settings_level">Livella</string>
     <string name="settings_level_desc">Una linea dell\'orizzonte che prende il colore d\'accento quando la foto è dritta.</string>
+    <string name="page_video">video</string>
+    <string name="settings_timelapse">Time-lapse</string>
+    <string name="settings_timelapse_desc">Tiene un fotogramma ogni 5, 10 o 30 e li riproduce a 30 fps, senza audio.</string>
+    <string name="settings_stabilise">Stabilizzazione</string>
+    <string name="settings_stabilise_desc">Sperimentale: rende più fermo il video con il giroscopio, ritagliando il 10 % dell\'inquadratura.</string>
+    <string name="video_info">H.264 con audio AAC: 1080p a 20 Mbit/s con la posteriore, 720p con la frontale. Il badge AE blocca esposizione e bilanciamento del bianco.</string>
 </resources>
