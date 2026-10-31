@@ -9,6 +9,8 @@ fonts or assets.
 Package `org.cityman.camera`, minSdk 33, targetSdk 36 (compileSdk 37.2, which the AndroidX
 libraries in use require).
 
+![Arco: arc dial, quick panel and settings](docs/screenshots/overview.png)
+
 ## What works
 
 - Full-screen viewfinder, portrait and landscape (follows the system auto-rotate setting; with
