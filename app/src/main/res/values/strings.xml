@@ -60,4 +60,6 @@
     <string name="switch_off">Off</string>
     <string name="settings_accent">System accent colour</string>
     <string name="settings_accent_desc">Use the colour of Android\'s theme (from the wallpaper). Off: amber.</string>
+    <string name="settings_level">Level</string>
+    <string name="settings_level_desc">A horizon line that turns to the accent colour when the photo is straight.</string>
 </resources>

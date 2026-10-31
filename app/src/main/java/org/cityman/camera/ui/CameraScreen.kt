@@ -65,6 +65,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -308,6 +309,7 @@ private fun Viewfinder(
             modifier = Modifier.fillMaxSize(),
         )
         AnalysisOverlay(controller, state)
+        if (state.level) LevelOverlay(controller)
         if (showGrid) {
             Canvas(Modifier.fillMaxSize()) {
                 val c = Color.White.copy(alpha = 0.35f)
@@ -330,6 +332,28 @@ private fun Viewfinder(
             }
         }
         if (flash.value > 0f) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = flash.value)))
+    }
+}
+
+/** Horizon line: follows the real horizon, accent coloured when the phone is level. */
+@Composable
+private fun LevelOverlay(controller: CameraController) {
+    val tilt by controller.tilt.collectAsStateWithLifecycle()
+    val t = tilt ?: return
+    if (kotlin.math.abs(t) > 25f) return
+    val level = kotlin.math.abs(t) < 1f
+    Canvas(Modifier.fillMaxSize()) {
+        val len = size.minDimension * 0.32f
+        val c = center
+        rotate(t, c) {
+            val color = if (level) Accent else Color.White.copy(alpha = 0.85f)
+            drawLine(color, Offset(c.x - len, c.y), Offset(c.x - len * 0.25f, c.y), 2.dp.toPx())
+            drawLine(color, Offset(c.x + len * 0.25f, c.y), Offset(c.x + len, c.y), 2.dp.toPx())
+        }
+        // Fixed reference marks at the screen's horizontal.
+        val mark = Color.White.copy(alpha = 0.5f)
+        drawLine(mark, Offset(c.x - len - 18.dp.toPx(), c.y), Offset(c.x - len - 6.dp.toPx(), c.y), 2.dp.toPx())
+        drawLine(mark, Offset(c.x + len + 6.dp.toPx(), c.y), Offset(c.x + len + 18.dp.toPx(), c.y), 2.dp.toPx())
     }
 }
 

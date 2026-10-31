@@ -72,6 +72,9 @@ data class CameraState(
     /** The phone is resting: multi-frame photos use the long night exposures. */
     val still: Boolean = false,
     val showHistogram: Boolean = false,
+    /** Launched from the lock screen: only this session's photos may be shown. */
+    val secure: Boolean = false,
+    val level: Boolean = false,
     /** Follow Android's dynamic accent colour (Material You) instead of amber. */
     val systemAccent: Boolean = true,
     /** Gallery app chosen for the thumbnail button (package name), null = system default. */
@@ -134,6 +137,9 @@ class CameraController(private val context: Context) {
             format = runCatching { PhotoFormat.valueOf(prefs.getString("format", null) ?: "FULL") }.getOrDefault(PhotoFormat.FULL),
             multiFrame = prefs.getBoolean("mf", false),
             showHistogram = prefs.getBoolean("histogram", false),
+            level = prefs.getBoolean("level", false),
+            mode = if (prefs.getString("mode", null) == "VIDEO") CaptureMode.VIDEO else CaptureMode.PHOTO,
+            cameraIndex = prefs.getInt("camera", 0),
             systemAccent = prefs.getBoolean("systemAccent", true),
             galleryPackage = prefs.getString("gallery", null),
             shutterSound = prefs.getBoolean("sound", true),
@@ -246,6 +252,7 @@ class CameraController(private val context: Context) {
     fun start() {
         started = true
         startGyro()
+        if (_state.value.level) startTilt()
         _state.update { it.copy(cameraCount = cameraIds.size) }
         camHandler.post { openCamera() }
         ioHandler.post { loadLatestThumbnail() }
@@ -254,6 +261,7 @@ class CameraController(private val context: Context) {
     fun stop() {
         started = false
         stopGyro()
+        stopTilt()
         wantedSize = null
         configuredGen = -1
         runOnCamAndWait(3000) { closeCamera() }
@@ -277,7 +285,7 @@ class CameraController(private val context: Context) {
         zoom = 1f
         _state.update {
             it.copy(
-                cameraIndex = (it.cameraIndex + 1) % cameraIds.size,
+                cameraIndex = ((it.cameraIndex + 1) % cameraIds.size).also { i -> prefs.edit().putInt("camera", i).apply() },
                 controls = controls, zoom = 1f, focusPoint = null, live = LiveValues(),
             )
         }
@@ -289,6 +297,7 @@ class CameraController(private val context: Context) {
         if (recorder != null) stopRecording(restartPreview = false)
         clearTapRegions()
         _state.update { it.copy(mode = mode) }
+        prefs.edit().putString("mode", mode.name).apply()
         reconfigure()
     }
 
@@ -409,6 +418,60 @@ class CameraController(private val context: Context) {
     fun focusKey() = camHandler.post {
         val c = caps ?: return@post
         if (c.hasAutoFocus && controls.focusDiopters == null) triggerAf()
+    }
+
+    /** Lock-screen launch: hide earlier photos (thumbnail) until the app is opened normally. */
+    fun setSecure(secure: Boolean) {
+        if (_state.value.secure == secure) return
+        _state.update { it.copy(secure = secure, thumbnail = if (secure) null else it.thumbnail, lastUri = if (secure) null else it.lastUri) }
+        if (!secure) ioHandler.post { loadLatestThumbnail() }
+    }
+
+    fun setLevel(on: Boolean) {
+        prefs.edit().putBoolean("level", on).apply()
+        _state.update { it.copy(level = on) }
+        if (on && started) startTilt() else stopTilt()
+    }
+
+    // ---- level: device tilt from the accelerometer --------------------------------------
+
+    private val _tilt = MutableStateFlow<Float?>(null)
+    /** Roll of the phone relative to the screen, degrees (null when lying flat). */
+    val tilt: StateFlow<Float?> = _tilt
+    private var gx = 0f
+    private var gy = 0f
+    private var gz = 0f
+    private var lastTilt = 0L
+    private val tiltListener = object : android.hardware.SensorEventListener {
+        override fun onSensorChanged(e: android.hardware.SensorEvent) {
+            gx = gx * 0.85f + e.values[0] * 0.15f
+            gy = gy * 0.85f + e.values[1] * 0.15f
+            gz = gz * 0.85f + e.values[2] * 0.15f
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastTilt < 60) return
+            lastTilt = now
+            val planar = kotlin.math.sqrt(gx * gx + gy * gy)
+            if (planar < 0.5f * kotlin.math.abs(gz)) {
+                _tilt.value = null
+                return
+            }
+            val roll = Math.toDegrees(kotlin.math.atan2(gx.toDouble(), gy.toDouble())).toFloat()
+            var t = (roll - displayRotationDegrees + 540f) % 360f - 180f
+            t -= Math.round(t / 90f) * 90f
+            _tilt.value = t
+        }
+
+        override fun onAccuracyChanged(s: android.hardware.Sensor, accuracy: Int) {}
+    }
+
+    private fun startTilt() {
+        val a = sensors?.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER) ?: return
+        sensors.registerListener(tiltListener, a, android.hardware.SensorManager.SENSOR_DELAY_UI)
+    }
+
+    private fun stopTilt() {
+        sensors?.unregisterListener(tiltListener)
+        _tilt.value = null
     }
 
     fun setSystemAccent(on: Boolean) {
@@ -1503,7 +1566,7 @@ class CameraController(private val context: Context) {
     // ---- helpers ------------------------------------------------------------------------
 
     private fun loadLatestThumbnail() {
-        if (_state.value.lastUri != null) return
+        if (_state.value.lastUri != null || _state.value.secure) return
         val (uri, video) = store.latest() ?: return
         val thumb = store.thumbnail(uri, video) ?: return
         _state.update { if (it.lastUri == null) it.copy(thumbnail = thumb, lastUri = uri, lastIsVideo = video) else it }

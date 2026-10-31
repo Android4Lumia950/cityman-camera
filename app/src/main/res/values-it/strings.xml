@@ -59,4 +59,6 @@
     <string name="switch_off">No</string>
     <string name="settings_accent">Colore d\'accento di sistema</string>
     <string name="settings_accent_desc">Usa il colore del tema di Android (dallo sfondo). Spento: ambra.</string>
+    <string name="settings_level">Livella</string>
+    <string name="settings_level_desc">Una linea dell\'orizzonte che prende il colore d\'accento quando la foto è dritta.</string>
 </resources>

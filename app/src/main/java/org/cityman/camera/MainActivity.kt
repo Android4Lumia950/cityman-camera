@@ -84,6 +84,7 @@ class MainActivity : ComponentActivity() {
         }
         controller = CameraController(this)
         hasCamera = granted(Manifest.permission.CAMERA)
+        handleLaunch(intent)
 
         orientationListener = object : OrientationEventListener(this) {
             override fun onOrientationChanged(orientation: Int) {
@@ -126,6 +127,28 @@ class MainActivity : ComponentActivity() {
 
     private val debugReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) = DebugCommands.apply(intent, controller)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleLaunch(intent)
+    }
+
+    /**
+     * Lock-screen launches (power key double press, camera key while locked) show the camera
+     * over the keyguard and keep earlier photos private; video and photo intents pick the mode.
+     */
+    private fun handleLaunch(intent: Intent?) {
+        val secure = intent?.action == MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE
+        setShowWhenLocked(secure)
+        setTurnScreenOn(secure)
+        controller.setSecure(secure)
+        when (intent?.action) {
+            MediaStore.INTENT_ACTION_VIDEO_CAMERA -> controller.setMode(org.cityman.camera.camera.CaptureMode.VIDEO)
+            MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA, MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE ->
+                controller.setMode(org.cityman.camera.camera.CaptureMode.PHOTO)
+        }
     }
 
     override fun onResume() {

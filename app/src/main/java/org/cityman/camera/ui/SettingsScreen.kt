@@ -146,6 +146,7 @@ private fun PhotoPage(controller: CameraController, state: CameraState) {
         onSelect = { controller.setTimer(it) },
     )
     Toggle(stringResource(R.string.settings_grid), stringResource(R.string.settings_grid_desc), state.grid) { controller.setGrid(it) }
+    Toggle(stringResource(R.string.settings_level), stringResource(R.string.settings_level_desc), state.level) { controller.setLevel(it) }
     Group(stringResource(R.string.group_viewfinder))
     BasicText(stringResource(R.string.settings_tools_desc), style = DescStyle)
     Toggle(stringResource(R.string.settings_histogram), null, state.showHistogram) {
