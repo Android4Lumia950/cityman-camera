@@ -21,4 +21,8 @@
     <string name="settings_histogram">Histogram</string>
     <string name="settings_zebra">Zebra (blown highlights)</string>
     <string name="settings_peaking">Focus peaking</string>
+    <string name="settings_dng_mf">Also save the merged RAW (DNG)</string>
+    <string name="settings_sound">Shutter sound</string>
+    <string name="settings_timer">SELF-TIMER</string>
+    <string name="settings_off">Off</string>
 </resources>

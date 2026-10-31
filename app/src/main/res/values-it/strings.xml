@@ -20,4 +20,8 @@
     <string name="settings_histogram">Istogramma</string>
     <string name="settings_zebra">Zebra (alte luci bruciate)</string>
     <string name="settings_peaking">Focus peaking</string>
+    <string name="settings_dng_mf">Salva anche il RAW fuso (DNG)</string>
+    <string name="settings_sound">Suono di scatto</string>
+    <string name="settings_timer">AUTOSCATTO</string>
+    <string name="settings_off">No</string>
 </resources>

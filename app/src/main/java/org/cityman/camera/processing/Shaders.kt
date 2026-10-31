@@ -13,6 +13,7 @@ precision highp float;
 precision highp int;
 precision highp image2D;
 precision highp iimage2D;
+precision highp uimage2D;
 precision highp sampler2D;
 precision highp usampler2D;
 """
@@ -184,6 +185,22 @@ void main() {
               - imageLoad(uGray, p + ivec2(0, 1)).r - imageLoad(uGray, p - ivec2(0, 1)).r;
     uint v = uint(min(lap * lap * 1.0e5, 4.0e4));
     atomicAdd(s[(gl_WorkGroupID.x + gl_WorkGroupID.y * 7u) & 255u], v);
+}
+"""
+
+    /** Merged result back to sensor units (black level added), for the merged DNG. */
+    val MOSAIC = GRID + """
+layout(rgba16f, binding = 0) readonly uniform image2D uAcc;
+layout(r32f, binding = 1) readonly uniform image2D uW;
+layout(rgba16ui, binding = 2) writeonly uniform highp uimage2D uOut;
+uniform vec4 uBlack;
+uniform float uWhite;
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(uOut)))) return;
+    vec4 v = imageLoad(uAcc, p) / imageLoad(uW, p).r;
+    vec4 raw = clamp(v * (uWhite - uBlack) + uBlack, vec4(0.0), vec4(uWhite));
+    imageStore(uOut, p, uvec4(round(raw)));
 }
 """
 

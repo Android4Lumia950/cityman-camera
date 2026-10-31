@@ -17,7 +17,13 @@ libraries in use require).
 - Photo: JPEG (quality 95, high-quality noise reduction and sharpening) and, from the settings,
   an extra DNG with the full 5344×3744 RAW frame (Android `DngCreator`). Files go to
   `DCIM/Camera` as `IMG_yyyyMMdd_HHmmss_SSS.jpg/.dng`.
-- Video: H.264 MP4 with AAC sound, 1080p at 20 Mbit/s on the rear camera, `VID_…mp4`.
+- Video: H.264 MP4 with AAC sound, 1080p at 20 Mbit/s on the rear camera (720p front),
+  `VID_…mp4`. Frames go camera → YUV → GL → recorder: this ROM's gralloc refuses buffers that
+  the camera writes and the encoder reads directly (`usage 0x30023`, BAD_VALUE), so the usual
+  recorder surface in the capture session records no frames. Rear video runs at 15–20 fps (the
+  sensor's single mode tops out at 20 fps).
+- Viewfinder tools, each optional: histogram, zebra on blown highlights, focus peaking.
+- Self-timer (3 or 10 s, a second press cancels), shutter sound on/off.
 - Manual controls on arc dials (tap a control chip to open its dial, drag along the ring, the
   automatic position is at the start of the ring; long-press a chip to put it back to auto):
   - **WB**: auto or 2400–8000 K. The Kelvin value becomes white balance gains through the
@@ -34,6 +40,8 @@ libraries in use require).
   Pinch to zoom (crop, up to 4×).
 - Hardware camera key: half press focuses, full press shoots. Volume keys also shoot.
 - Gallery thumbnail of the last photo or video, opens it in the system viewer.
+- Release builds use R8 (1.7 MB APK) and are signed from `keystore.properties` (storeFile,
+  storePassword, keyAlias, keyPassword; not in git) when present.
 
 - Multi-frame RAW processing (see below), optional.
 
@@ -114,15 +122,19 @@ Optional (settings, or the **MF** badge at the top left). When it is on, the shu
 of RAW frames and merges them on the GPU (OpenGL ES 3.1 compute shaders, `processing/`) into a
 20 MP JPEG (`IMG_…_MF.jpg`) from the full 5344×3744 sensor, instead of the HAL's 13 MP JPEG.
 
-1. **Exposure plan** (`CameraController.burstPlan`): 0.7 EV under what auto exposure measured,
-   to keep highlights; short frames against hand shake: 1/30 s, and longer (up to 1/10 s, the
-   rear lens has OIS) only once ISO is at its manual maximum and 2× digital gain would not be
-   enough. The HAL clamps manual ISO at 342 on the rear camera (auto exposure reaches ~1800 with
+1. **Exposure plan** (`CameraController.burstPlan`): under what auto exposure measured, by
+   0.4–1.6 EV depending on how much of the viewfinder is blown out; short frames against hand
+   shake: 1/30 s (shorter when the gyroscope sees shake and there is light to spare), longer
+   (up to 1/10 s, the rear lens has OIS) only once ISO is at its manual maximum and 2× digital
+   gain would not be enough. When the phone rests for 1.5 s (tripod, table) the burst becomes a
+   night burst: up to 12 frames of up to 1/2 s (badge "NIGHT · STILL"). Fewer frames when the
+   thermal headroom runs out. The HAL clamps manual ISO at 342 on the rear camera (auto exposure reaches ~1800 with
    ISP digital gain), so whatever is missing becomes digital gain after the merge, where the
    noise is lower. 6 frames, 8 in low light (or 4/6/8 from the settings). With
    manual ISO or shutter set, the burst uses those values.
-2. **Merge**, frame by frame as they arrive (memory stays constant): black level, Bayer 2×2
-   blocks packed into one texel; grey pyramid (½, ¼, ¼); coarse-to-fine tile alignment (tiles
+2. **Merge**, frame by frame as they arrive (memory stays constant): black level, hot and dead
+   pixel correction, Bayer 2×2 blocks packed into one texel; the sharpest of the first three
+   frames (Laplacian energy) is the reference; grey pyramid (½, ¼, ¼); coarse-to-fine tile alignment (tiles
    16/8 px, L1 at the finest level, L2 above), with a sub-pixel refinement at the finest level
    (parabola through the costs) and bilinear sampling of each colour plane; per 2×2 block, choice between the tile's offset and
    the two nearest tiles' offsets, and a robustness weight from the local difference against the
@@ -139,15 +151,16 @@ of RAW frames and merges them on the GPU (OpenGL ES 3.1 compute shaders, `proces
    unsharp mask, rotation to upright.
 
 Every finishing step can be turned off in the settings: noise reduction, local tone mapping,
-colour noise reduction, sharpening.
+colour noise reduction, sharpening; "vivid colours" switches to a stronger look. With DNG on,
+the merged RAW is saved too (`IMG_…_MF.dng`, black level and white level of the sensor,
+reference frame metadata). The JPEG carries EXIF (camera, ISO, shutter, aperture, frames).
 
 Timing on the phone (31/10/2026, 6 frames): about 0.3 s per frame for upload, alignment and
 merge (overlapping the capture), 1 s of GPU finishing, 0.3 s readback; the JPEG is encoded in the
 background (0.8–1.4 s) and the shutter is free again before that. With `PROFILE = true` in
 `MultiFrameProcessor.kt` the log (`adb logcat -s ArcoMerge`) shows each stage.
 
-Not done yet: DNG output in multi-frame mode, the HAL's hardware JPEG encoder (through YUV
-reprocessing) instead of the CPU one, super-resolution, a learned or frequency-domain merge.
+Not done yet: see [ROADMAP.md](ROADMAP.md).
 
 ## Roadmap
 

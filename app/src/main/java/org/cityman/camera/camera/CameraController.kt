@@ -72,6 +72,10 @@ data class CameraState(
     /** The phone is resting: multi-frame photos use the long night exposures. */
     val still: Boolean = false,
     val showHistogram: Boolean = false,
+    val shutterSound: Boolean = true,
+    /** Self-timer length in seconds (0 = off) and the seconds left while it runs. */
+    val timerSeconds: Int = 0,
+    val countdown: Int = 0,
     val zebra: Boolean = false,
     val peaking: Boolean = false,
     /** Clockwise rotation from the sensor image to the viewfinder, for overlays. */
@@ -126,6 +130,8 @@ class CameraController(private val context: Context) {
             format = runCatching { PhotoFormat.valueOf(prefs.getString("format", null) ?: "FULL") }.getOrDefault(PhotoFormat.FULL),
             multiFrame = prefs.getBoolean("mf", false),
             showHistogram = prefs.getBoolean("histogram", false),
+            shutterSound = prefs.getBoolean("sound", true),
+            timerSeconds = prefs.getInt("timer", 0),
             zebra = prefs.getBoolean("zebra", false),
             peaking = prefs.getBoolean("peaking", false),
             mfFrames = prefs.getInt("mfFrames", 0),
@@ -399,9 +405,46 @@ class CameraController(private val context: Context) {
         if (c.hasAutoFocus && controls.focusDiopters == null) triggerAf()
     }
 
+    fun setShutterSound(on: Boolean) {
+        prefs.edit().putBoolean("sound", on).apply()
+        _state.update { it.copy(shutterSound = on) }
+    }
+
+    fun setTimer(seconds: Int) {
+        prefs.edit().putInt("timer", seconds).apply()
+        _state.update { it.copy(timerSeconds = seconds) }
+    }
+
+    private val countdownTick = object : Runnable {
+        override fun run() {
+            val left = _state.value.countdown - 1
+            if (left <= 0) {
+                _state.update { it.copy(countdown = 0) }
+                takePicture()
+            } else {
+                _state.update { it.copy(countdown = left) }
+                camHandler.postDelayed(this, 1000)
+            }
+        }
+    }
+
     fun shutter() = camHandler.post {
         when (_state.value.mode) {
-            CaptureMode.PHOTO -> takePicture()
+            CaptureMode.PHOTO -> {
+                val st = _state.value
+                when {
+                    // A second press cancels the self-timer.
+                    st.countdown > 0 -> {
+                        camHandler.removeCallbacks(countdownTick)
+                        _state.update { it.copy(countdown = 0) }
+                    }
+                    st.timerSeconds > 0 -> {
+                        _state.update { it.copy(countdown = st.timerSeconds) }
+                        camHandler.postDelayed(countdownTick, 1000)
+                    }
+                    else -> takePicture()
+                }
+            }
             CaptureMode.VIDEO -> if (recorder == null) startRecording() else stopRecording(restartPreview = true)
         }
     }
@@ -462,6 +505,8 @@ class CameraController(private val context: Context) {
     }
 
     private fun closeCamera() {
+        camHandler.removeCallbacks(countdownTick)
+        _state.update { it.copy(countdown = 0) }
         if (recorder != null) stopRecording(restartPreview = false)
         closeSession()
         device?.close()
@@ -863,7 +908,7 @@ class CameraController(private val context: Context) {
 
     private val stillCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureStarted(s: CameraCaptureSession, request: CaptureRequest, timestamp: Long, frameNumber: Long) {
-            sound.play(MediaActionSound.SHUTTER_CLICK)
+            if (_state.value.shutterSound) sound.play(MediaActionSound.SHUTTER_CLICK)
             _state.update { it.copy(shutterCount = it.shutterCount + 1) }
         }
 
@@ -1064,13 +1109,18 @@ class CameraController(private val context: Context) {
             val i = (target / exp).roundToInt().coerceIn(isoRange.lower, isoRange.upper)
             Triple(i, exp, (product / (i.toDouble() * exp)).toFloat().coerceIn(1f, 64f))
         }
+        // Fewer frames when the phone is getting hot.
+        val headroom = runCatching { powerManager?.getThermalHeadroom(10) ?: 0f }.getOrDefault(0f)
+        val hot = headroom.isFinite() && headroom >= 0.9f ||
+            (powerManager?.currentThermalStatus ?: 0) >= android.os.PowerManager.THERMAL_STATUS_MODERATE
         val chosen = _state.value.mfFrames
-        val frames = when {
+        val frames = if (hot) 4 else when {
             chosen > 0 -> chosen
             tripod && (gain >= 1.5f || exposure >= 100_000_000L) -> MAX_BURST
             gain >= 1.8f || (isoRange != null && iso >= isoRange.upper * 0.9) -> 8
             else -> 6
         }.coerceIn(2, MAX_BURST)
+        if (hot) Log.w(TAG, "thermal headroom $headroom: burst limited to $frames frames")
         Log.i(TAG, "plan: gyro ${String.format(java.util.Locale.US, "%.4f", omega)} rad/s${if (tripod) " (still)" else ""}, shake limit ${shakeLimit / 1000} µs, clipped ${analyzer?.latestClipped}")
         return BurstPlan(iso, exposure, gain, frames, underUsed)
     }
@@ -1078,6 +1128,7 @@ class CameraController(private val context: Context) {
     // ---- gyroscope: how much the hand shakes, for the burst exposure ----------------------
 
     private val sensors = context.getSystemService(android.hardware.SensorManager::class.java)
+    private val powerManager = context.getSystemService(android.os.PowerManager::class.java)
     @Volatile private var gyroRate = 0.0
     @Volatile private var gyroSamples = 0
     /** Largest rate seen since the camera started: a gyroscope that never moves is not trusted. */
@@ -1196,7 +1247,7 @@ class CameraController(private val context: Context) {
         override fun onCaptureStarted(s: CameraCaptureSession, request: CaptureRequest, timestamp: Long, frameNumber: Long) {
             if (started) return
             started = true
-            sound.play(MediaActionSound.SHUTTER_CLICK)
+            if (_state.value.shutterSound) sound.play(MediaActionSound.SHUTTER_CLICK)
             _state.update { it.copy(shutterCount = it.shutterCount + 1, processing = true) }
         }
 
@@ -1252,6 +1303,12 @@ class CameraController(private val context: Context) {
             val gains = result[CaptureResult.COLOR_CORRECTION_GAINS] ?: RggbChannelVector(2f, 1f, 1f, 1.6f)
             val ccm = result[CaptureResult.COLOR_CORRECTION_TRANSFORM]
                 ?: ColorSpaceTransform(intArrayOf(1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1))
+            // Merged DNG first (it needs the accumulator, which finishing frees).
+            if (_state.value.saveDng) {
+                val raw = runCatching { processor.mergedRaw() }.onFailure { Log.e(TAG, "merged raw", it) }.getOrNull()
+                val c = caps
+                if (raw != null && c != null) ioHandler.post { saveMergedDng(c, result, raw, job.setup) }
+            }
             processor.finish(gains, ccm, result[CaptureResult.STATISTICS_LENS_SHADING_CORRECTION_MAP])
         } catch (e: Throwable) {
             Log.e(TAG, "finish burst", e)
@@ -1289,6 +1346,22 @@ class CameraController(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "save multi-frame", e)
             report("Could not save the photo: ${e.message}")
+        }
+    }
+
+    /** io thread: the merged RAW as a DNG, with the reference frame's metadata. */
+    private fun saveMergedDng(c: CameraCaps, result: TotalCaptureResult, raw: java.nio.ByteBuffer, setup: BurstSetup) {
+        try {
+            val uri = store.createImage(store.baseName("IMG") + "_MF.dng", "image/x-adobe-dng") ?: error("MediaStore insert failed")
+            DngCreator(c.chars, result).use { dng ->
+                dng.setOrientation(exifOrientation(setup.rotation))
+                store.write(uri) { dng.writeByteBuffer(it, Size(setup.width, setup.height), raw, 0) }
+            }
+            store.publish(uri)
+            Log.i(TAG, "saved $uri (merged DNG)")
+        } catch (e: Exception) {
+            Log.e(TAG, "save merged DNG", e)
+            report("Could not save the DNG: ${e.message}")
         }
     }
 
@@ -1360,7 +1433,7 @@ class CameraController(private val context: Context) {
         recordingUri = uri
         recordingFd = fd
         startRepeating()
-        sound.play(MediaActionSound.START_VIDEO_RECORDING)
+        if (_state.value.shutterSound) sound.play(MediaActionSound.START_VIDEO_RECORDING)
         _state.update { it.copy(recording = true, recordingSince = SystemClock.elapsedRealtime()) }
     }
 
@@ -1384,7 +1457,7 @@ class CameraController(private val context: Context) {
         recordingFd?.close()
         recordingFd = null
         recordingUri = null
-        sound.play(MediaActionSound.STOP_VIDEO_RECORDING)
+        if (_state.value.shutterSound) sound.play(MediaActionSound.STOP_VIDEO_RECORDING)
         _state.update { it.copy(recording = false) }
         if (uri != null) {
             if (ok) {

@@ -219,6 +219,13 @@ fun CameraScreen(
         )
 
         if (st.recording) RecordingTimer(st.recordingSince, Modifier.align(Alignment.TopCenter).padding(top = 12.dp))
+        if (st.countdown > 0) {
+            BasicText(
+                st.countdown.toString(),
+                style = TextStyle(color = Color.White, fontSize = 96.sp, fontWeight = FontWeight.Light),
+                modifier = Modifier.align(if (portrait) Alignment.Center else Alignment.Center).rotate(rotation),
+            )
+        }
 
         AnimatedVisibility(
             visible = showSettings,
@@ -235,6 +242,8 @@ fun CameraScreen(
                 onFrames = { controller.setMultiFrameFrames(it) },
                 onOptions = { controller.setMultiFrameOptions(it) },
                 onTools = { h, z, p -> controller.setAnalysisTools(h, z, p) },
+                onSound = { controller.setShutterSound(it) },
+                onTimer = { controller.setTimer(it) },
             )
         }
 
@@ -589,6 +598,8 @@ private fun SettingsPanel(
     onFrames: (Int) -> Unit,
     onOptions: (ProcessingOptions) -> Unit,
     onTools: (Boolean, Boolean, Boolean) -> Unit,
+    onSound: (Boolean) -> Unit,
+    onTimer: (Int) -> Unit,
 ) {
     val caps = state.caps
     Column(
@@ -600,6 +611,15 @@ private fun SettingsPanel(
             .padding(vertical = 6.dp),
     ) {
         ToggleRow(stringResource(R.string.settings_grid), state.grid) { onGrid(!state.grid) }
+        ToggleRow(stringResource(R.string.settings_sound), state.shutterSound) { onSound(!state.shutterSound) }
+        if (state.mode == CaptureMode.PHOTO) {
+            SectionTitle(stringResource(R.string.settings_timer))
+            Row(Modifier.padding(horizontal = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                for (t in listOf(0, 3, 10)) {
+                    Pill(if (t == 0) stringResource(R.string.settings_off) else "${t}s", state.timerSeconds == t) { onTimer(t) }
+                }
+            }
+        }
         if (state.mode == CaptureMode.PHOTO) {
             ToggleRow(stringResource(R.string.settings_histogram), state.showHistogram) { onTools(!state.showHistogram, state.zebra, state.peaking) }
             ToggleRow(stringResource(R.string.settings_zebra), state.zebra) { onTools(state.showHistogram, !state.zebra, state.peaking) }
@@ -620,9 +640,8 @@ private fun SettingsPanel(
                 ToggleRow(stringResource(R.string.settings_mf_tone), o.localTone) { onOptions(o.copy(localTone = !o.localTone)) }
                 ToggleRow(stringResource(R.string.settings_mf_chroma), o.chromaDenoise) { onOptions(o.copy(chromaDenoise = !o.chromaDenoise)) }
                 ToggleRow(stringResource(R.string.settings_mf_sharpen), o.sharpen) { onOptions(o.copy(sharpen = !o.sharpen)) }
-            } else {
-                ToggleRow(stringResource(R.string.settings_dng), state.saveDng) { onDng(!state.saveDng) }
             }
+            ToggleRow(stringResource(if (state.multiFrame) R.string.settings_dng_mf else R.string.settings_dng), state.saveDng) { onDng(!state.saveDng) }
         }
         if (caps != null && state.mode == CaptureMode.PHOTO) {
             SectionTitle(stringResource(R.string.settings_format))

@@ -236,6 +236,70 @@ class MultiFrameProcessor {
     private var sharpBuffer = 0
 
     /** Finishes the merged image; returns an upright ARGB bitmap. */
+    /**
+     * The merged frame as a RAW16 mosaic (little endian, width × 2 bytes per row), for a DNG.
+     * Call after the last frame and before [finish].
+     */
+    fun mergedRaw(): ByteBuffer? {
+        val s = setup ?: return null
+        if (!refChosen) chooseReference(s)
+        val acc = accs?.get(accCur) ?: return null
+        val qw = s.width / 2
+        val qh = s.height / 2
+        val out = Tex(qw, qh, GLES31.GL_RGBA16UI)
+        val p = program("mosaic", Shaders.MOSAIC)
+        p.use()
+        acc.bindImage(0, GLES31.GL_READ_ONLY)
+        weight!!.bindImage(1, GLES31.GL_READ_ONLY)
+        out.bindImage(2, GLES31.GL_WRITE_ONLY)
+        val b = FloatArray(4)
+        for (i in 0 until 4) b[s.chanAt[i]] = s.black[i]
+        p.set("uBlack", b[0], b[1], b[2], b[3])
+        p.set("uWhite", s.white)
+        p.dispatch(qw, qh)
+        val fbo = IntArray(1)
+        GLES31.glGenFramebuffers(1, fbo, 0)
+        GLES31.glBindFramebuffer(GLES31.GL_FRAMEBUFFER, fbo[0])
+        GLES31.glFramebufferTexture2D(GLES31.GL_FRAMEBUFFER, GLES31.GL_COLOR_ATTACHMENT0, GLES31.GL_TEXTURE_2D, out.id, 0)
+        val quads = ByteBuffer.allocateDirect(qw * qh * 8).order(ByteOrder.nativeOrder())
+        GLES31.glReadPixels(0, 0, qw, qh, GLES31.GL_RGBA_INTEGER, GLES31.GL_UNSIGNED_SHORT, quads)
+        GLES31.glBindFramebuffer(GLES31.GL_FRAMEBUFFER, 0)
+        GLES31.glDeleteFramebuffers(1, fbo, 0)
+        out.release()
+        Gl.check("merged raw")
+        // Quad channels back to their places in the 2×2 pattern.
+        val src = quads.asShortBuffer()
+        val mosaic = ByteBuffer.allocateDirect(s.width * s.height * 2).order(ByteOrder.LITTLE_ENDIAN)
+        val dst = mosaic.asShortBuffer()
+        val pos = IntArray(4) // raw index within the 2×2 block of each quad channel
+        for (i in 0 until 4) pos[s.chanAt[i]] = i
+        // Row by row with bulk copies (element access on NIO buffers is far too slow here).
+        val quadRow = ShortArray(qw * 4)
+        val row0 = ShortArray(s.width)
+        val row1 = ShortArray(s.width)
+        val off0 = IntArray(4) { c -> if (pos[c] < 2) pos[c] % 2 else -1 }
+        val off1 = IntArray(4) { c -> if (pos[c] >= 2) pos[c] % 2 else -1 }
+        for (y in 0 until qh) {
+            src.position(y * qw * 4)
+            src.get(quadRow)
+            for (c in 0 until 4) {
+                val o0 = off0[c]
+                val o1 = off1[c]
+                if (o0 >= 0) {
+                    var x = 0
+                    while (x < qw) { row0[x * 2 + o0] = quadRow[x * 4 + c]; x++ }
+                } else {
+                    var x = 0
+                    while (x < qw) { row1[x * 2 + o1] = quadRow[x * 4 + c]; x++ }
+                }
+            }
+            dst.position(y * 2 * s.width); dst.put(row0)
+            dst.position((y * 2 + 1) * s.width); dst.put(row1)
+        }
+        mosaic.position(0)
+        return mosaic
+    }
+
     fun finish(
         gains: RggbChannelVector,
         ccm: ColorSpaceTransform,
