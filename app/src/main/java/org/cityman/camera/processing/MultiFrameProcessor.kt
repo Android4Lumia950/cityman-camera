@@ -16,6 +16,9 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
+/** A finished photo: upright NV21 pixels for the JPEG encoder and a small preview bitmap. */
+class FinishedImage(val nv21: ByteArray, val width: Int, val height: Int, val thumbnail: Bitmap)
+
 /** Which steps of the finishing stage run; all of them can be turned off in the settings. */
 data class ProcessingOptions(
     val denoise: Boolean = true,
@@ -304,7 +307,7 @@ class MultiFrameProcessor {
         gains: RggbChannelVector,
         ccm: ColorSpaceTransform,
         shading: LensShadingMap?,
-    ): Bitmap {
+    ): FinishedImage {
         val s = setup ?: error("no burst")
         if (!refChosen) chooseReference(s)
         val t0 = SystemClock.elapsedRealtime()
@@ -458,15 +461,31 @@ class MultiFrameProcessor {
         }
         tone.release()
 
+        // NV21 for the encoder (less to read back than RGBA), and a small bitmap for the thumbnail.
+        val yTex = Tex(ow / 4, oh, GLES31.GL_RGBA8)
+        val vuTex = Tex(ow / 4, oh / 2, GLES31.GL_RGBA8)
+        run {
+            val p = program("nv21", Shaders.TO_NV21)
+            p.use()
+            out.bindImage(0, GLES31.GL_READ_ONLY)
+            yTex.bindImage(1, GLES31.GL_WRITE_ONLY)
+            vuTex.bindImage(2, GLES31.GL_WRITE_ONLY)
+            p.dispatch(ow / 4, oh / 2)
+        }
         GLES31.glFinish()
         val tGpu = SystemClock.elapsedRealtime()
-        val bitmap = readBitmap(out)
+        val nv21 = ByteArray(ow * oh * 3 / 2)
+        readInto(yTex, nv21, 0)
+        readInto(vuTex, nv21, ow * oh)
+        val thumb = thumbnailFromNv21(nv21, ow, oh)
         Log.i(TAG, "finish: gpu ${tGpu - t0} ms, readback ${SystemClock.elapsedRealtime() - tGpu} ms")
+        yTex.release()
+        vuTex.release()
         out.release()
         Gl.check("finish")
         Log.i(TAG, "processed $frames frames in ${SystemClock.elapsedRealtime() - startedAt} ms, gain $gainUse (planned ${s.gain}), noise ${noise.toList()}")
         setup = null
-        return bitmap
+        return FinishedImage(nv21, ow, oh, thumb)
     }
 
     /** Drops a burst that will not be finished. */
@@ -649,6 +668,45 @@ class MultiFrameProcessor {
         }
         peaks.sort()
         return (sum / n).toFloat() to peaks[(n * 0.99f).toInt().coerceIn(0, n - 1)]
+    }
+
+    /** Reads an RGBA8 texture's bytes into [dst] at [offset]. */
+    private fun readInto(t: Tex, dst: ByteArray, offset: Int) {
+        val fbo = IntArray(1)
+        GLES31.glGenFramebuffers(1, fbo, 0)
+        GLES31.glBindFramebuffer(GLES31.GL_FRAMEBUFFER, fbo[0])
+        GLES31.glFramebufferTexture2D(GLES31.GL_FRAMEBUFFER, GLES31.GL_COLOR_ATTACHMENT0, GLES31.GL_TEXTURE_2D, t.id, 0)
+        GLES31.glPixelStorei(GLES31.GL_PACK_ALIGNMENT, 4)
+        val buf = ByteBuffer.allocateDirect(t.width * t.height * 4)
+        GLES31.glReadPixels(0, 0, t.width, t.height, GLES31.GL_RGBA, GLES31.GL_UNSIGNED_BYTE, buf)
+        GLES31.glBindFramebuffer(GLES31.GL_FRAMEBUFFER, 0)
+        GLES31.glDeleteFramebuffers(1, fbo, 0)
+        Gl.check("readInto")
+        buf.position(0)
+        buf.get(dst, offset, t.width * t.height * 4)
+    }
+
+    /** About 256 px thumbnail sampled from the NV21 pixels (no extra GPU readback). */
+    private fun thumbnailFromNv21(nv21: ByteArray, w: Int, h: Int): Bitmap {
+        val step = maxOf(2, (maxOf(w, h) / 256) and 1.inv())
+        val tw = w / step
+        val th = h / step
+        val px = IntArray(tw * th)
+        for (ty in 0 until th) {
+            val y = ty * step
+            for (tx in 0 until tw) {
+                val x = tx * step
+                val yy = (nv21[y * w + x].toInt() and 0xff).toFloat()
+                val ci = w * h + (y / 2) * w + (x / 2) * 2
+                val v = (nv21[ci].toInt() and 0xff) - 128f
+                val u = (nv21[ci + 1].toInt() and 0xff) - 128f
+                val r = (yy + 1.402f * v).toInt().coerceIn(0, 255)
+                val g = (yy - 0.344136f * u - 0.714136f * v).toInt().coerceIn(0, 255)
+                val b = (yy + 1.772f * u).toInt().coerceIn(0, 255)
+                px[ty * tw + tx] = (0xff shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
+        return Bitmap.createBitmap(px, tw, th, Bitmap.Config.ARGB_8888)
     }
 
     private fun readBitmap(t: Tex): Bitmap {

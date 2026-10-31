@@ -520,6 +520,37 @@ void main() {
 """
 
     /**
+     * Upright RGBA → NV21 for the JPEG encoder (full-range BT.601, as JFIF). Images cannot be
+     * single-byte in ES 3.1, so four luma bytes (or two V,U pairs) are packed in one RGBA8 texel.
+     */
+    val TO_NV21 = GRID + """
+layout(rgba8, binding = 0) readonly uniform image2D uSrc;
+layout(rgba8, binding = 1) writeonly uniform image2D uY;
+layout(rgba8, binding = 2) writeonly uniform image2D uVu;
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+void main() {
+    ivec2 t = ivec2(gl_GlobalInvocationID.xy);   // one texel = 4 pixels across, 2 rows down
+    ivec2 ysz = imageSize(uY);
+    if (t.x >= ysz.x || t.y * 2 >= ysz.y) return;
+    ivec2 p = ivec2(t.x * 4, t.y * 2);
+    vec3 c[8];
+    for (int i = 0; i < 4; i++) {
+        c[i] = imageLoad(uSrc, p + ivec2(i, 0)).rgb;
+        c[i + 4] = imageLoad(uSrc, p + ivec2(i, 1)).rgb;
+    }
+    imageStore(uY, ivec2(t.x, p.y), vec4(luma(c[0]), luma(c[1]), luma(c[2]), luma(c[3])));
+    imageStore(uY, ivec2(t.x, p.y + 1), vec4(luma(c[4]), luma(c[5]), luma(c[6]), luma(c[7])));
+    vec3 a = 0.25 * (c[0] + c[1] + c[4] + c[5]);
+    vec3 b = 0.25 * (c[2] + c[3] + c[6] + c[7]);
+    float cbA = 0.5 - 0.168736 * a.r - 0.331264 * a.g + 0.5 * a.b;
+    float crA = 0.5 + 0.5 * a.r - 0.418688 * a.g - 0.081312 * a.b;
+    float cbB = 0.5 - 0.168736 * b.r - 0.331264 * b.g + 0.5 * b.b;
+    float crB = 0.5 + 0.5 * b.r - 0.418688 * b.g - 0.081312 * b.b;
+    imageStore(uVu, t, vec4(crA, cbA, crB, cbB));
+}
+"""
+
+    /**
      * Luma unsharp mask with a small noise threshold, written rotated clockwise by uRot degrees
      * so the JPEG needs no orientation tag.
      */

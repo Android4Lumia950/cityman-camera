@@ -1210,7 +1210,7 @@ class CameraController(private val context: Context) {
             else -> 6
         }.coerceIn(2, MAX_BURST)
         if (hot) Log.w(TAG, "thermal headroom $headroom: burst limited to $frames frames")
-        Log.i(TAG, "plan: gyro ${String.format(java.util.Locale.US, "%.4f", omega)} rad/s${if (tripod) " (still)" else ""}, shake limit ${shakeLimit / 1000} µs, clipped ${analyzer?.latestClipped}")
+        Log.i(TAG, "plan: accel jitter ${String.format(java.util.Locale.US, "%.3f", accelJitter)}, gyro ${String.format(java.util.Locale.US, "%.4f", omega)} rad/s${if (tripod) " (still)" else ""}, shake limit ${shakeLimit / 1000} µs, clipped ${analyzer?.latestClipped}")
         return BurstPlan(iso, exposure, gain, frames, underUsed)
     }
 
@@ -1224,10 +1224,45 @@ class CameraController(private val context: Context) {
     @Volatile private var gyroMaxSeen = 0.0
     @Volatile private var stillSince = 0L
 
-    /** Phone resting (tripod, table): no rotation above the threshold for 1.5 s. */
-    private fun isStill(): Boolean =
-        gyroSamples > 20 && gyroMaxSeen > 0.0 && stillSince > 0L &&
-            SystemClock.elapsedRealtime() - stillSince > 1500
+    /**
+     * Phone resting (tripod, table): no rotation above the threshold for 1.5 s. A gyroscope that
+     * has not shown any movement yet is not trusted alone: then the accelerometer's jitter decides.
+     */
+    private fun isStill(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        val accelStill = accelStillSince > 0L && now - accelStillSince > 1500
+        if (gyroSamples > 20 && gyroMaxSeen > 0.0) {
+            return stillSince > 0L && now - stillSince > 1500 && (accelSamples < 20 || accelStill)
+        }
+        return accelSamples > 20 && accelStill
+    }
+
+    // Accelerometer jitter (deviation from its slow average), for the still test.
+    @Volatile private var accelStillSince = 0L
+    @Volatile private var accelSamples = 0
+    @Volatile private var accelJitter = 0f
+    private var ax = 0f
+    private var ay = 0f
+    private var az = 0f
+    private val accelListener = object : android.hardware.SensorEventListener {
+        override fun onSensorChanged(e: android.hardware.SensorEvent) {
+            if (accelSamples == 0) { ax = e.values[0]; ay = e.values[1]; az = e.values[2] }
+            val dx = e.values[0] - ax
+            val dy = e.values[1] - ay
+            val dz = e.values[2] - az
+            ax += dx * 0.05f; ay += dy * 0.05f; az += dz * 0.05f
+            accelSamples++
+            val jitter = kotlin.math.sqrt(dx * dx + dy * dy + dz * dz)
+            // Average the jitter: single samples of sensor noise reach 0.1 m/s² even at rest.
+            accelJitter = if (accelSamples == 1) jitter else accelJitter * 0.9f + jitter * 0.1f
+            val now = SystemClock.elapsedRealtime()
+            if (accelJitter > ACCEL_STILL_MS2 || accelStillSince == 0L) accelStillSince = now
+            val still = isStill()
+            if (still != _state.value.still) _state.update { it.copy(still = still) }
+        }
+
+        override fun onAccuracyChanged(s: android.hardware.Sensor, accuracy: Int) {}
+    }
     private val gyroListener = object : android.hardware.SensorEventListener {
         override fun onSensorChanged(e: android.hardware.SensorEvent) {
             val w = kotlin.math.sqrt((e.values[0] * e.values[0] + e.values[1] * e.values[1] + e.values[2] * e.values[2]).toDouble())
@@ -1250,11 +1285,17 @@ class CameraController(private val context: Context) {
         gyroRate = 0.0
         gyroMaxSeen = 0.0
         stillSince = 0L
+        accelSamples = 0
+        accelStillSince = 0L
+        sensors.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER)?.let {
+            sensors.registerListener(accelListener, it, android.hardware.SensorManager.SENSOR_DELAY_GAME)
+        }
         sensors.registerListener(gyroListener, g, android.hardware.SensorManager.SENSOR_DELAY_GAME)
     }
 
     private fun stopGyro() {
         sensors?.unregisterListener(gyroListener)
+        sensors?.unregisterListener(accelListener)
         gyroSamples = 0
         gyroRate = 0.0
     }
@@ -1413,24 +1454,21 @@ class CameraController(private val context: Context) {
             }
         }
         ioHandler.post {
-            if (bitmap != null) saveBitmap(bitmap, job.info) else report("Multi-frame processing failed")
+            if (bitmap != null) saveFinished(bitmap, job.info) else report("Multi-frame processing failed")
         }
     }
 
     /** io thread */
-    private fun saveBitmap(bitmap: Bitmap, info: ShotInfo) {
+    private fun saveFinished(img: org.cityman.camera.processing.FinishedImage, info: ShotInfo) {
         try {
             val uri = store.createImage(store.baseName("IMG") + "_MF.jpg", "image/jpeg") ?: error("MediaStore insert failed")
             val t0 = SystemClock.elapsedRealtime()
-            store.write(uri) { bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+            store.write(uri) { org.cityman.camera.processing.ParallelJpeg.encodeNv21(img.nv21, img.width, img.height, 95, it) }
             Log.i(TAG, "JPEG encode ${SystemClock.elapsedRealtime() - t0} ms")
-            runCatching { writeExif(uri, bitmap.width, bitmap.height, info) }
+            runCatching { writeExif(uri, img.width, img.height, info) }
                 .onFailure { Log.w(TAG, "EXIF", it) }
             store.publish(uri)
-            val scale = 256f / max(bitmap.width, bitmap.height)
-            val thumb = Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).roundToInt(), (bitmap.height * scale).roundToInt(), true)
-            bitmap.recycle()
-            _state.update { it.copy(thumbnail = thumb, lastUri = uri, lastIsVideo = false) }
+            _state.update { it.copy(thumbnail = img.thumbnail, lastUri = uri, lastIsVideo = false) }
             Log.i(TAG, "saved $uri (multi-frame)")
         } catch (e: Exception) {
             Log.e(TAG, "save multi-frame", e)
@@ -1615,6 +1653,7 @@ class CameraController(private val context: Context) {
         private const val MAX_BURST = 12
         private const val NIGHT_SHUTTER_NS = 500_000_000L
         private const val TRIPOD_RAD_S = 0.008
+        private const val ACCEL_STILL_MS2 = 0.12f
         private const val BURST_UNDER_EV = 0.7
         private const val BURST_MAX_SHUTTER_NS = 33_333_333L
         private const val BURST_LOW_LIGHT_SHUTTER_NS = 100_000_000L
