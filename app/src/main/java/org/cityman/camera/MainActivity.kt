@@ -1,6 +1,7 @@
 package org.cityman.camera
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -10,6 +11,7 @@ import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Bundle
+import android.provider.MediaStore
 import android.view.KeyEvent
 import android.view.OrientationEventListener
 import android.view.Surface
@@ -94,7 +96,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             if (hasCamera) {
-                CameraScreen(controller, iconRotation, ::openMedia)
+                CameraScreen(controller, iconRotation, ::openMedia, ::galleryApps)
             } else {
                 PermissionScreen { requestPermissions() }
             }
@@ -192,15 +194,48 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Opens the last photo or video in the gallery's review mode, which lets the user swipe
+     * through the camera album (VIEW would show that single file only). With the phone locked,
+     * the secure variant shows only what the camera gives it.
+     */
     private fun openMedia(uri: Uri, video: Boolean) {
-        val intent = Intent(Intent.ACTION_VIEW)
-            .setDataAndType(uri, if (video) "video/mp4" else "image/jpeg")
+        val locked = getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == true
+        val mime = if (video) "video/mp4" else "image/jpeg"
+        val pkg = controller.state.value.galleryPackage
+        val review = Intent(if (locked) MediaStore.ACTION_REVIEW_SECURE else MediaStore.ACTION_REVIEW)
+            .setDataAndType(uri, mime)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        try {
-            startActivity(intent)
-        } catch (_: ActivityNotFoundException) {
-            Toast.makeText(this, R.string.no_viewer, Toast.LENGTH_SHORT).show()
+        val view = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, mime)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        // The chosen gallery first (review mode, then plain view), then any app.
+        val attempts = buildList {
+            if (pkg != null) {
+                add(Intent(review).setPackage(pkg))
+                add(Intent(view).setPackage(pkg))
+            }
+            add(review)
+            add(view)
         }
+        for (intent in attempts) {
+            try {
+                startActivity(intent)
+                return
+            } catch (_: ActivityNotFoundException) {
+            }
+        }
+        Toast.makeText(this, R.string.no_viewer, Toast.LENGTH_SHORT).show()
+    }
+
+    /** Apps that can show photos: (package, label), sorted by label. */
+    private fun galleryApps(): List<Pair<String, String>> {
+        val probe = Intent(Intent.ACTION_VIEW).setDataAndType(Uri.parse("content://media/external/images/media/1"), "image/jpeg")
+        return packageManager.queryIntentActivities(probe, 0)
+            .map { it.activityInfo.packageName to it.loadLabel(packageManager).toString() }
+            .filter { it.first != packageName }
+            .distinctBy { it.first }
+            .sortedBy { it.second.lowercase() }
     }
 }
 

@@ -25,4 +25,6 @@
     <string name="settings_sound">Shutter sound</string>
     <string name="settings_timer">SELF-TIMER</string>
     <string name="settings_off">Off</string>
+    <string name="settings_gallery">GALLERY</string>
+    <string name="settings_gallery_default">System default</string>
 </resources>

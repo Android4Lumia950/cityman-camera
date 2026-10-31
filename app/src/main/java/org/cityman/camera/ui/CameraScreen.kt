@@ -94,6 +94,7 @@ fun CameraScreen(
     controller: CameraController,
     iconRotation: Float,
     onOpenMedia: (Uri, Boolean) -> Unit,
+    galleryApps: () -> List<Pair<String, String>> = { emptyList() },
 ) {
     val st by controller.state.collectAsStateWithLifecycle()
     var openDial by remember { mutableStateOf<DialKind?>(null) }
@@ -243,6 +244,8 @@ fun CameraScreen(
                 onOptions = { controller.setMultiFrameOptions(it) },
                 onTools = { h, z, p -> controller.setAnalysisTools(h, z, p) },
                 onSound = { controller.setShutterSound(it) },
+                galleryApps = galleryApps,
+                onGallery = { controller.setGallery(it) },
                 onTimer = { controller.setTimer(it) },
             )
         }
@@ -600,6 +603,8 @@ private fun SettingsPanel(
     onTools: (Boolean, Boolean, Boolean) -> Unit,
     onSound: (Boolean) -> Unit,
     onTimer: (Int) -> Unit,
+    galleryApps: () -> List<Pair<String, String>>,
+    onGallery: (String?) -> Unit,
 ) {
     val caps = state.caps
     Column(
@@ -612,6 +617,26 @@ private fun SettingsPanel(
     ) {
         ToggleRow(stringResource(R.string.settings_grid), state.grid) { onGrid(!state.grid) }
         ToggleRow(stringResource(R.string.settings_sound), state.shutterSound) { onSound(!state.shutterSound) }
+        val apps = remember { galleryApps() }
+        if (apps.isNotEmpty()) {
+            SectionTitle(stringResource(R.string.settings_gallery))
+            val options = listOf<Pair<String?, String>>(null to stringResource(R.string.settings_gallery_default)) + apps
+            for ((pkg, label) in options) {
+                val selected = state.galleryPackage == pkg || (pkg == null && apps.none { it.first == state.galleryPackage })
+                Row(
+                    Modifier.clickable { onGallery(pkg) }.padding(horizontal = 16.dp, vertical = 9.dp).width(268.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        Modifier.size(16.dp).border(2.dp, if (selected) Accent else Color.White.copy(alpha = 0.5f), CircleShape).padding(4.dp),
+                    ) {
+                        if (selected) Box(Modifier.fillMaxSize().background(Accent, CircleShape))
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    BasicText(label, style = TextStyle(color = Color.White, fontSize = 15.sp))
+                }
+            }
+        }
         if (state.mode == CaptureMode.PHOTO) {
             SectionTitle(stringResource(R.string.settings_timer))
             Row(Modifier.padding(horizontal = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {

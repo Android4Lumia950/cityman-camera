@@ -24,4 +24,6 @@
     <string name="settings_sound">Suono di scatto</string>
     <string name="settings_timer">AUTOSCATTO</string>
     <string name="settings_off">No</string>
+    <string name="settings_gallery">GALLERIA</string>
+    <string name="settings_gallery_default">Predefinita di sistema</string>
 </resources>

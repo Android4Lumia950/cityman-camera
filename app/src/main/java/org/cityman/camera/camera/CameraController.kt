@@ -72,6 +72,8 @@ data class CameraState(
     /** The phone is resting: multi-frame photos use the long night exposures. */
     val still: Boolean = false,
     val showHistogram: Boolean = false,
+    /** Gallery app chosen for the thumbnail button (package name), null = system default. */
+    val galleryPackage: String? = null,
     val shutterSound: Boolean = true,
     /** Self-timer length in seconds (0 = off) and the seconds left while it runs. */
     val timerSeconds: Int = 0,
@@ -130,6 +132,7 @@ class CameraController(private val context: Context) {
             format = runCatching { PhotoFormat.valueOf(prefs.getString("format", null) ?: "FULL") }.getOrDefault(PhotoFormat.FULL),
             multiFrame = prefs.getBoolean("mf", false),
             showHistogram = prefs.getBoolean("histogram", false),
+            galleryPackage = prefs.getString("gallery", null),
             shutterSound = prefs.getBoolean("sound", true),
             timerSeconds = prefs.getInt("timer", 0),
             zebra = prefs.getBoolean("zebra", false),
@@ -403,6 +406,11 @@ class CameraController(private val context: Context) {
     fun focusKey() = camHandler.post {
         val c = caps ?: return@post
         if (c.hasAutoFocus && controls.focusDiopters == null) triggerAf()
+    }
+
+    fun setGallery(pkg: String?) {
+        prefs.edit().putString("gallery", pkg).apply()
+        _state.update { it.copy(galleryPackage = pkg) }
     }
 
     fun setShutterSound(on: Boolean) {
