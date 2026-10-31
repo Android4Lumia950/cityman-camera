@@ -1185,7 +1185,16 @@ class CameraController(private val context: Context) {
 
     @Volatile private var burst: Burst? = null
 
-    private data class BurstPlan(val iso: Int, val exposureNs: Long, val gain: Float, val frames: Int, val underEv: Float = BURST_UNDER_EV.toFloat())
+    private data class BurstPlan(
+        val iso: Int,
+        val exposureNs: Long,
+        val gain: Float,
+        val frames: Int,
+        val underEv: Float = BURST_UNDER_EV.toFloat(),
+        /** Extra highlight frames (bracketing) at [shortExposureNs], appended after [frames]. */
+        val shortFrames: Int = 0,
+        val shortExposureNs: Long = 0,
+    )
 
     /**
      * Exposure of the burst frames. Automatic: 0.7 EV under what auto exposure measured (to keep
@@ -1254,7 +1263,15 @@ class CameraController(private val context: Context) {
         }.coerceIn(2, MAX_BURST)
         if (hot) Log.w(TAG, "thermal headroom $headroom: burst limited to $frames frames")
         Log.i(TAG, "plan: accel jitter ${String.format(java.util.Locale.US, "%.3f", accelJitter)}, gyro ${String.format(java.util.Locale.US, "%.4f", omega)} rad/s${if (tripod) " (still)" else ""}, shake limit ${shakeLimit / 1000} µs, clipped ${analyzer?.latestClipped}")
-        return BurstPlan(iso, exposure, gain, frames, underUsed)
+        // Backlit scenes: two frames 2 EV shorter recover what is blown in the others.
+        val clippedNow = analyzer?.latestClipped ?: 0f
+        val shortExp = exposure / 4
+        val bracket = m.iso == null && m.exposureNs == null && !tripod && clippedNow > 0.02f &&
+            expRange != null && shortExp >= expRange.lower && frames + 2 <= MAX_BURST
+        return BurstPlan(
+            iso, exposure, gain, frames, underUsed,
+            shortFrames = if (bracket) 2 else 0, shortExposureNs = if (bracket) shortExp else 0,
+        )
     }
 
     // ---- gyroscope: how much the hand shakes, for the burst exposure ----------------------
@@ -1370,9 +1387,10 @@ class CameraController(private val context: Context) {
         val setup = BurstSetup(
             width = raw.width, height = raw.height, chanAt = cfaChannels(c), black = black, white = white,
             gain = plan.gain, rotation = current.orientation, iso = plan.iso, options = _state.value.mfOptions,
-            frames = plan.frames,
+            frames = plan.frames + plan.shortFrames,
             underEv = plan.underEv,
             zoom = zoom,
+            shortFrames = plan.shortFrames,
             crop = if (raw.width == c.activeArray.width() && raw.height == c.activeArray.height()) 0 else 16,
         )
         val info = ShotInfo(
@@ -1380,8 +1398,8 @@ class CameraController(private val context: Context) {
             fNumber = c.chars[CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES]?.firstOrNull(),
             focalMm = c.chars[CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS]?.firstOrNull()?.takeIf { it > 0f },
         )
-        val job = Burst(plan.frames, setup, info)
-        Log.i(TAG, "burst ${plan.frames} × ISO ${plan.iso} ${plan.exposureNs / 1000} µs, gain ${plan.gain}, zoom $zoom")
+        val job = Burst(plan.frames + plan.shortFrames, setup, info)
+        Log.i(TAG, "burst ${plan.frames} × ISO ${plan.iso} ${plan.exposureNs / 1000} µs + ${plan.shortFrames} highlight frames, gain ${plan.gain}, zoom $zoom")
         gpuHandler.post {
             try {
                 processor.begin(setup)
@@ -1393,15 +1411,16 @@ class CameraController(private val context: Context) {
         burst = job
         try {
             val awbAuto = controls.wbKelvin == null
-            val requests = (0 until plan.frames).map {
+            val requests = (0 until plan.frames + plan.shortFrames).map { i ->
+                val exposure = if (i < plan.frames) plan.exposureNs else plan.shortExposureNs
                 val b = dev.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
                 b.addTarget(raw.surface)
                 b.addTarget(preview)
                 applyControls(b, still = false)
                 b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
                 b.set(CaptureRequest.SENSOR_SENSITIVITY, plan.iso)
-                b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, plan.exposureNs)
-                b.set(CaptureRequest.SENSOR_FRAME_DURATION, plan.exposureNs)
+                b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure)
+                b.set(CaptureRequest.SENSOR_FRAME_DURATION, exposure)
                 if (awbAuto) b.set(CaptureRequest.CONTROL_AWB_LOCK, true)
                 b.set(CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE, CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON)
                 b.build()

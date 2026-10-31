@@ -50,6 +50,9 @@ data class BurstSetup(
     val underEv: Float = 0.7f,
     /** Viewfinder zoom at capture: the photo is the centred crop, doubled from 1.5× up. */
     val zoom: Float = 1f,
+    /** The last frames of the burst are this many highlight frames, [shortScale] times shorter. */
+    val shortFrames: Int = 0,
+    val shortScale: Float = 4f,
 )
 
 /**
@@ -150,20 +153,21 @@ class MultiFrameProcessor {
         if (!refChosen) {
             // Hold the first frames and score their sharpness; merge once the reference is known.
             val q = Tex(r.width / 2, r.height / 2, GLES31.GL_RGBA16F)
-            pack(r, q, s)
+            pack(r, q, s, 1f)
             held += q
             sharpness += measureSharpness(q)
             lap("pack+sharpness")
-            if (held.size >= min(HOLD, s.frames)) chooseReference(s)
+            if (held.size >= min(HOLD, s.frames - s.shortFrames).coerceAtLeast(1)) chooseReference(s)
         } else {
             val target = alt!!
-            pack(r, target, s)
+            val short = frames >= s.frames - s.shortFrames
+            pack(r, target, s, if (short) s.shortScale else 1f)
             lap("pack")
             gray(target, altPyr)
             lap("pyramid")
             alignLevels()
             lap("align")
-            merge()
+            merge(short = frames >= s.frames - s.shortFrames, hdr = s.shortFrames > 0)
             lap("merge")
         }
         frames++
@@ -187,6 +191,7 @@ class MultiFrameProcessor {
             accs!![0].bindImage(1, GLES31.GL_WRITE_ONLY)
             accCur = 0
             weight!!.bindImage(2, GLES31.GL_WRITE_ONLY)
+            p.set("uHdr", if (s.shortFrames > 0) 1 else 0)
             p.dispatch(ref!!.width, ref!!.height)
         }
         var noiseDone = false
@@ -199,7 +204,7 @@ class MultiFrameProcessor {
                 estimateNoise(s)
                 noiseDone = true
             }
-            merge()
+            merge(short = false, hdr = s.shortFrames > 0)
         }
         // Later frames reuse one held texture; any other one stays as a spare for the finish.
         alt = others.firstOrNull() ?: Tex(ref!!.width, ref!!.height, GLES31.GL_RGBA16F)
@@ -333,6 +338,7 @@ class MultiFrameProcessor {
             p.set("uLsc", 0)
             p.set("uLscSize", lsc.width.toFloat(), lsc.height.toFloat())
             p.set("uGains", gains.red, gains.greenEven, gains.greenOdd, gains.blue)
+            p.set("uClipScale", if (s.shortFrames > 0) s.shortScale else 1f)
             p.dispatch(qw, qh)
         }
         // Spatial noise reduction into one of the (now free) accumulators.
@@ -401,6 +407,29 @@ class MultiFrameProcessor {
             baseTmp.bindImage(0, GLES31.GL_READ_ONLY); base.bindImage(1, GLES31.GL_WRITE_ONLY)
             b.setI("uDir", 0, 1); b.dispatch(bw, bh)
         }
+        // Fine base layer (blocks of 4), for edges.
+        val ff = 4
+        val fw = (qw + ff - 1) / ff
+        val fh = (qh + ff - 1) / ff
+        val fineRaw = Tex(fw, fh, GLES31.GL_RGBA16F)
+        val fineTmp = Tex(fw, fh, GLES31.GL_RGBA16F)
+        val baseFine = Tex(fw, fh, GLES31.GL_RGBA16F, linear = true)
+        run {
+            val p = program("base", Shaders.BASE)
+            p.use()
+            half.bindImage(0, GLES31.GL_READ_ONLY); fineRaw.bindImage(1, GLES31.GL_WRITE_ONLY)
+            p.set("uF", ff)
+            p.setMat3("uCcm", ccmRows)
+            p.dispatch(fw, fh)
+            val b = program("blur", Shaders.BLUR)
+            b.use()
+            fineRaw.bindImage(0, GLES31.GL_READ_ONLY); fineTmp.bindImage(1, GLES31.GL_WRITE_ONLY)
+            b.setI("uDir", 1, 0); b.dispatch(fw, fh)
+            fineTmp.bindImage(0, GLES31.GL_READ_ONLY); baseFine.bindImage(1, GLES31.GL_WRITE_ONLY)
+            b.setI("uDir", 0, 1); b.dispatch(fw, fh)
+        }
+        fineRaw.release()
+        fineTmp.release()
         tmp.release()
         baseTmp.release()
 
@@ -424,6 +453,7 @@ class MultiFrameProcessor {
             tone.bindImage(1, GLES31.GL_WRITE_ONLY)
             halfBlur.bindSampler(0); p.set("uHalfBlur", 0)
             base.bindSampler(1); p.set("uBase", 1)
+            baseFine.bindSampler(2); p.set("uBaseFine", 2)
             p.setI4("uChanAt", s.chanAt[0], s.chanAt[1], s.chanAt[2], s.chanAt[3])
             p.setMat3("uCcm", ccmRows)
             p.set("uGain", gainUse)
@@ -440,6 +470,7 @@ class MultiFrameProcessor {
         }
         halfBlur.release()
         base.release()
+        baseFine.release()
         keep?.release()
         alt?.release(); alt = null
         ref?.release(); ref = null
@@ -534,7 +565,7 @@ class MultiFrameProcessor {
 
     // ---- stages -------------------------------------------------------------------------
 
-    private fun pack(r: Tex, target: Tex, s: BurstSetup) {
+    private fun pack(r: Tex, target: Tex, s: BurstSetup, scale: Float) {
         val p = program("pack", Shaders.PACK)
         p.use()
         r.bindSampler(0)
@@ -553,6 +584,7 @@ class MultiFrameProcessor {
         for (i in 0 until 4) b[s.chanAt[i]] = s.black[i]
         p.set("uBlack", b[0], b[1], b[2], b[3])
         p.set("uWhite", s.white)
+        p.set("uScale", scale)
         p.dispatch(target.width, target.height)
     }
 
@@ -632,7 +664,7 @@ class MultiFrameProcessor {
         noise = fitNoise(counts, s.iso)
     }
 
-    private fun merge() {
+    private fun merge(short: Boolean, hdr: Boolean) {
         val d = program("mergeDecide", Shaders.MERGE_DECIDE)
         d.use()
         refPyr[0].bindImage(0, GLES31.GL_READ_ONLY)
@@ -652,6 +684,9 @@ class MultiFrameProcessor {
         acc[accCur].bindImage(2, GLES31.GL_READ_ONLY)
         acc[1 - accCur].bindImage(3, GLES31.GL_WRITE_ONLY)
         weight!!.bindImage(4, GLES31.GL_READ_WRITE)
+        ref!!.bindImage(5, GLES31.GL_READ_ONLY)
+        a.set("uHdr", if (hdr) 1 else 0)
+        a.set("uShort", if (short) 1 else 0)
         a.dispatch(alt!!.width, alt!!.height)
         accCur = 1 - accCur
     }

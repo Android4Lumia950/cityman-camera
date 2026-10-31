@@ -29,6 +29,7 @@ layout(rgba16f, binding = 0) writeonly uniform image2D uQuad;
 uniform ivec2 uOff[4];
 uniform vec4 uBlack;
 uniform float uWhite;
+uniform float uScale;   // exposure ratio to the reference (4 for the -2 EV highlight frames)
 float raw(ivec2 p, ivec2 lim) {
     return float(texelFetch(uRaw, clamp(p, ivec2(0), lim), 0).r);
 }
@@ -53,7 +54,7 @@ void main() {
         v[c] = x;
     }
     v = (v - uBlack) / (uWhite - uBlack);
-    imageStore(uQuad, q, clamp(v, -0.1, 1.0));
+    imageStore(uQuad, q, clamp(v, -0.1, 1.0) * uScale);
 }
 """
 
@@ -64,7 +65,8 @@ layout(r32f, binding = 1) writeonly uniform image2D uGray;
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(p, imageSize(uGray)))) return;
-    imageStore(uGray, p, vec4(dot(imageLoad(uQuad, p), vec4(0.25))));
+    // Clamped at white so that highlight frames (scaled above 1) align with the others.
+    imageStore(uGray, p, vec4(dot(min(imageLoad(uQuad, p), vec4(1.0)), vec4(0.25))));
 }
 """
 
@@ -209,11 +211,16 @@ void main() {
 layout(rgba16f, binding = 0) readonly uniform image2D uRef;
 layout(rgba16f, binding = 1) writeonly uniform image2D uAcc;
 layout(r32f, binding = 2) writeonly uniform image2D uW;
+uniform int uHdr;
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(p, imageSize(uRef)))) return;
-    imageStore(uAcc, p, imageLoad(uRef, p));
-    imageStore(uW, p, vec4(1.0));
+    vec4 r = imageLoad(uRef, p);
+    // With highlight frames in the burst, near-white reference pixels hand over to them.
+    float hl = uHdr == 1 ? smoothstep(0.85, 0.97, max(max(r.x, r.y), max(r.z, r.w))) : 0.0;
+    float w = max(1.0 - hl, 0.001);
+    imageStore(uAcc, p, r * w);
+    imageStore(uW, p, vec4(w));
 }
 """
 
@@ -277,12 +284,21 @@ layout(rgba16f, binding = 1) readonly uniform image2D uDec;
 layout(rgba16f, binding = 2) readonly uniform image2D uAccIn;
 layout(rgba16f, binding = 3) writeonly uniform image2D uAccOut;
 layout(r32f, binding = 4) uniform image2D uW;
+layout(rgba16f, binding = 5) readonly uniform image2D uRef;
+uniform int uHdr;
+uniform int uShort;
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(uAlt);
     if (any(greaterThanEqual(p, size))) return;
     vec4 d = imageLoad(uDec, p / 2);
     float w = d.z;
+    if (uHdr == 1) {
+        // Highlight frames only where the reference is near white; normal frames elsewhere.
+        vec4 r = imageLoad(uRef, p);
+        float hl = smoothstep(0.85, 0.97, max(max(r.x, r.y), max(r.z, r.w)));
+        w *= uShort == 1 ? hl : 1.0 - hl;
+    }
     // Bilinear between quad pixels: each colour plane is a regular grid, so this keeps the
     // pattern while following sub-pixel motion.
     vec2 q = vec2(p) + d.xy;
@@ -308,6 +324,7 @@ layout(rgba16f, binding = 3) writeonly uniform image2D uHalf;
 uniform sampler2D uLsc;
 uniform vec2 uLscSize;
 uniform vec4 uGains;
+uniform float uClipScale;
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(uMq);
@@ -320,7 +337,7 @@ void main() {
     vec4 k = lsc * uGains;
     // Sensor saturation lands at a different level in each channel once shading and white
     // balance gains are applied; clip all of them to the lowest so blown highlights stay white.
-    float clipLevel = min(min(k.x, k.y), min(k.z, k.w));
+    float clipLevel = min(min(k.x, k.y), min(k.z, k.w)) * uClipScale;
     v = min(max(v, 0.0) * k, vec4(clipLevel));
     imageStore(uMq, p, v);
     imageStore(uHalf, p, vec4(v.x, 0.5 * (v.y + v.z), v.w, 1.0));
@@ -424,6 +441,7 @@ layout(rgba16f, binding = 0) readonly uniform image2D uMq;
 layout(rgba8, binding = 1) writeonly uniform image2D uOut;
 uniform sampler2D uHalfBlur;
 uniform sampler2D uBase;
+uniform sampler2D uBaseFine;
 uniform ivec4 uChanAt;   // channel index at (0,0), (1,0), (0,1), (1,1)
 uniform mat3 uCcm;
 uniform float uGain;
@@ -495,7 +513,10 @@ void main() {
     lin *= uGain;
     float l = max(dot(lin, LUM), 1.0e-6);
     if (uLocal > 0.5) {
-        float base = texture(uBase, uv).r + log2(uGain);
+        // Two scales: near strong edges (where they disagree) the fine one, to avoid halos.
+        float bc = texture(uBase, uv).r;
+        float bf = texture(uBaseFine, uv).r;
+        float base = mix(bc, bf, clamp(abs(bf - bc) / 1.5, 0.0, 1.0)) + log2(uGain);
         float logL = log2(l);
         // Compress bright regions more than dark ones are lifted, so shadows keep their depth.
         float c = base > uAnchor ? uCompress : uLift;
