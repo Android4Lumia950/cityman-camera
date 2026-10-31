@@ -15,4 +15,6 @@
     <string name="settings_mf_chroma">Riduzione rumore colore</string>
     <string name="settings_mf_sharpen">Nitidezza</string>
     <string name="settings_mf_denoise">Riduzione rumore</string>
+    <string name="settings_mf_vivid">Colori vivaci</string>
+    <string name="badge_still">NOTTE · FERMO</string>
 </resources>

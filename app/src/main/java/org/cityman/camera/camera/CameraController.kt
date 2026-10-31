@@ -69,6 +69,8 @@ data class CameraState(
     val mfFrames: Int = 0,
     val mfOptions: ProcessingOptions = ProcessingOptions(),
     val processing: Boolean = false,
+    /** The phone is resting: multi-frame photos use the long night exposures. */
+    val still: Boolean = false,
     val controls: ManualControls = ManualControls(),
     val live: LiveValues = LiveValues(),
     val previewSize: Size? = null,
@@ -117,6 +119,7 @@ class CameraController(private val context: Context) {
             mfFrames = prefs.getInt("mfFrames", 0),
             mfOptions = ProcessingOptions(
                 denoise = prefs.getBoolean("mfDenoise", true),
+                vivid = prefs.getBoolean("mfVivid", false),
                 localTone = prefs.getBoolean("mfLocalTone", true),
                 chromaDenoise = prefs.getBoolean("mfChroma", true),
                 sharpen = prefs.getBoolean("mfSharpen", true),
@@ -211,6 +214,7 @@ class CameraController(private val context: Context) {
 
     fun start() {
         started = true
+        startGyro()
         _state.update { it.copy(cameraCount = cameraIds.size) }
         camHandler.post { openCamera() }
         ioHandler.post { loadLatestThumbnail() }
@@ -218,6 +222,7 @@ class CameraController(private val context: Context) {
 
     fun stop() {
         started = false
+        stopGyro()
         wantedSize = null
         configuredGen = -1
         runOnCamAndWait(3000) { closeCamera() }
@@ -282,6 +287,7 @@ class CameraController(private val context: Context) {
     fun setMultiFrameOptions(o: ProcessingOptions) {
         prefs.edit()
             .putBoolean("mfDenoise", o.denoise)
+            .putBoolean("mfVivid", o.vivid)
             .putBoolean("mfLocalTone", o.localTone)
             .putBoolean("mfChroma", o.chromaDenoise)
             .putBoolean("mfSharpen", o.sharpen)
@@ -959,6 +965,19 @@ class CameraController(private val context: Context) {
         val m = controls
         val isoRange = c.isoRange
         val expRange = c.exposureRange
+        val omega = gyroRate
+        // Focal length in RAW pixels (both lenses are about 70° wide) and the blur we accept per
+        // frame: 2 px, twice that behind the rear lens' optical stabiliser.
+        val rawWidth = c.rawSize?.width ?: 4000
+        val focalPx = rawWidth / 1.4
+        val blurPx = if (c.front) 2.0 else 4.0
+        val tripod = isStill()
+        val shakeLimit = when {
+            tripod -> NIGHT_SHUTTER_NS.toDouble()
+            gyroSamples < 20 || gyroMaxSeen <= 0.0 -> BURST_LOW_LIGHT_SHUTTER_NS.toDouble()
+            omega <= 0.0 -> BURST_LOW_LIGHT_SHUTTER_NS.toDouble()
+            else -> (blurPx / (omega * focalPx) * 1e9).coerceIn(1e9 / 60, BURST_LOW_LIGHT_SHUTTER_NS.toDouble())
+        }.toLong()
         val (iso, exposure, gain) = if (m.iso != null || m.exposureNs != null || isoRange == null || expRange == null) {
             val (i, e) = manualExposure(c, m)
             Triple(i, e, 1f)
@@ -967,12 +986,13 @@ class CameraController(private val context: Context) {
             val product = autoIso.toDouble() * autoExposureNs * ev
             val target = product * 2.0.pow(-BURST_UNDER_EV)
             // Short frames keep hand shake out of each frame (merging takes care of the noise):
-            // 1/30 s, longer only once ISO is at its maximum, up to 1/10 s (the rear lens is
-            // stabilised); below that, digital gain.
+            // 1/30 s or what the gyroscope allows, longer only once ISO is at its maximum.
             // Manual ISO stops at the sensor's analogue maximum (342 here, the HAL clamps higher
-            // values); up to 2× digital gain after the merge costs less than hand shake.
-            val atMaxIso = (target / (isoRange.upper * BURST_DIGITAL_GAIN_FIRST)).toLong()
-            val cap = atMaxIso.coerceIn(BURST_MAX_SHUTTER_NS, BURST_LOW_LIGHT_SHUTTER_NS)
+            // values); handheld, up to 2× digital gain after the merge costs less than shake.
+            // On a tripod (gyroscope still) the frames grow up to 1/2 s instead of gaining.
+            val base = min(BURST_MAX_SHUTTER_NS, shakeLimit)
+            val atMaxIso = (target / (isoRange.upper * if (tripod) 1.0 else BURST_DIGITAL_GAIN_FIRST)).toLong()
+            val cap = atMaxIso.coerceIn(base, max(base, shakeLimit))
             val exp = (target / isoRange.lower).toLong().coerceIn(expRange.lower, min(cap, expRange.upper))
             val i = (target / exp).roundToInt().coerceIn(isoRange.lower, isoRange.upper)
             Triple(i, exp, (product / (i.toDouble() * exp)).toFloat().coerceIn(1f, 64f))
@@ -980,10 +1000,56 @@ class CameraController(private val context: Context) {
         val chosen = _state.value.mfFrames
         val frames = when {
             chosen > 0 -> chosen
+            tripod && (gain >= 1.5f || exposure >= 100_000_000L) -> MAX_BURST
             gain >= 1.8f || (isoRange != null && iso >= isoRange.upper * 0.9) -> 8
             else -> 6
         }.coerceIn(2, MAX_BURST)
+        Log.i(TAG, "plan: gyro ${String.format(java.util.Locale.US, "%.4f", omega)} rad/s${if (tripod) " (still)" else ""}, shake limit ${shakeLimit / 1000} µs")
         return BurstPlan(iso, exposure, gain, frames)
+    }
+
+    // ---- gyroscope: how much the hand shakes, for the burst exposure ----------------------
+
+    private val sensors = context.getSystemService(android.hardware.SensorManager::class.java)
+    @Volatile private var gyroRate = 0.0
+    @Volatile private var gyroSamples = 0
+    /** Largest rate seen since the camera started: a gyroscope that never moves is not trusted. */
+    @Volatile private var gyroMaxSeen = 0.0
+    @Volatile private var stillSince = 0L
+
+    /** Phone resting (tripod, table): no rotation above the threshold for 1.5 s. */
+    private fun isStill(): Boolean =
+        gyroSamples > 20 && gyroMaxSeen > 0.0 && stillSince > 0L &&
+            SystemClock.elapsedRealtime() - stillSince > 1500
+    private val gyroListener = object : android.hardware.SensorEventListener {
+        override fun onSensorChanged(e: android.hardware.SensorEvent) {
+            val w = kotlin.math.sqrt((e.values[0] * e.values[0] + e.values[1] * e.values[1] + e.values[2] * e.values[2]).toDouble())
+            // About 0.3 s of smoothing at 50 Hz, but follow a sudden movement at once.
+            gyroRate = if (gyroSamples == 0) w else max(w, gyroRate * 0.93 + w * 0.07)
+            gyroSamples++
+            if (w > gyroMaxSeen) gyroMaxSeen = w
+            val now = SystemClock.elapsedRealtime()
+            if (w > TRIPOD_RAD_S || stillSince == 0L) stillSince = now
+            val still = isStill()
+            if (still != _state.value.still) _state.update { it.copy(still = still) }
+        }
+
+        override fun onAccuracyChanged(s: android.hardware.Sensor, accuracy: Int) {}
+    }
+
+    private fun startGyro() {
+        val g = sensors?.getDefaultSensor(android.hardware.Sensor.TYPE_GYROSCOPE) ?: return
+        gyroSamples = 0
+        gyroRate = 0.0
+        gyroMaxSeen = 0.0
+        stillSince = 0L
+        sensors.registerListener(gyroListener, g, android.hardware.SensorManager.SENSOR_DELAY_GAME)
+    }
+
+    private fun stopGyro() {
+        sensors?.unregisterListener(gyroListener)
+        gyroSamples = 0
+        gyroRate = 0.0
     }
 
     private fun cfaChannels(c: CameraCaps): IntArray = when (c.chars[CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT]) {
@@ -1012,6 +1078,7 @@ class CameraController(private val context: Context) {
         val setup = BurstSetup(
             width = raw.width, height = raw.height, chanAt = cfaChannels(c), black = black, white = white,
             gain = plan.gain, rotation = current.orientation, iso = plan.iso, options = _state.value.mfOptions,
+            frames = plan.frames,
             crop = if (raw.width == c.activeArray.width() && raw.height == c.activeArray.height()) 0 else 16,
         )
         val info = ShotInfo(
@@ -1315,7 +1382,9 @@ class CameraController(private val context: Context) {
     companion object {
         private const val TAG = "ArcoCamera"
         private const val MAX_AUTO_SHUTTER_NS = 250_000_000L
-        private const val MAX_BURST = 8
+        private const val MAX_BURST = 12
+        private const val NIGHT_SHUTTER_NS = 500_000_000L
+        private const val TRIPOD_RAD_S = 0.008
         private const val BURST_UNDER_EV = 0.7
         private const val BURST_MAX_SHUTTER_NS = 33_333_333L
         private const val BURST_LOW_LIGHT_SHUTTER_NS = 100_000_000L

@@ -19,6 +19,8 @@ import kotlin.math.sqrt
 /** Which steps of the finishing stage run; all of them can be turned off in the settings. */
 data class ProcessingOptions(
     val denoise: Boolean = true,
+    /** Stronger contrast and colour than the default natural look. */
+    val vivid: Boolean = false,
     val localTone: Boolean = true,
     val chromaDenoise: Boolean = true,
     val sharpen: Boolean = true,
@@ -39,6 +41,8 @@ data class BurstSetup(
     val crop: Int = 0,
     val iso: Int,
     val options: ProcessingOptions,
+    /** Frames in the burst: the sharpest of the first three becomes the reference. */
+    val frames: Int = 8,
 )
 
 /**
@@ -55,6 +59,11 @@ class MultiFrameProcessor {
     private var raw: Tex? = null
     private var ref: Tex? = null
     private var alt: Tex? = null
+    /** The first frames, kept until the reference is chosen. */
+    private var held: MutableList<Tex> = ArrayList()
+    private var sharpness: MutableList<Double> = ArrayList()
+    private var refChosen = false
+    private var spare: Tex? = null
     private var refPyr: List<Tex> = emptyList()
     private var altPyr: List<Tex> = emptyList()
     private var align: List<Tex> = emptyList()
@@ -95,8 +104,12 @@ class MultiFrameProcessor {
         val qw = s.width / 2
         val qh = s.height / 2
         raw = Tex(s.width, s.height, GLES31.GL_R16UI)
-        ref = Tex(qw, qh, GLES31.GL_RGBA16F)
-        alt = Tex(qw, qh, GLES31.GL_RGBA16F)
+        held = ArrayList()
+        sharpness = ArrayList()
+        refChosen = false
+        ref = null
+        alt = null
+        spare = null
         refPyr = pyramid(qw, qh)
         altPyr = pyramid(qw, qh)
         align = LEVELS.indices.map { i ->
@@ -127,23 +140,22 @@ class MultiFrameProcessor {
         Gl.check("upload")
         lap("upload")
 
-        val target = if (frames == 0) ref!! else alt!!
-        pack(r, target, s)
-        lap("pack")
-        gray(target, if (frames == 0) refPyr else altPyr)
-        lap("pyramid")
-        if (frames == 0) {
-            val p = program("init", Shaders.INIT)
-            p.use()
-            ref!!.bindImage(0, GLES31.GL_READ_ONLY)
-            accs!![0].bindImage(1, GLES31.GL_WRITE_ONLY)
-            accCur = 0
-            weight!!.bindImage(2, GLES31.GL_WRITE_ONLY)
-            p.dispatch(ref!!.width, ref!!.height)
+        if (!refChosen) {
+            // Hold the first frames and score their sharpness; merge once the reference is known.
+            val q = Tex(r.width / 2, r.height / 2, GLES31.GL_RGBA16F)
+            pack(r, q, s)
+            held += q
+            sharpness += measureSharpness(q)
+            lap("pack+sharpness")
+            if (held.size >= min(HOLD, s.frames)) chooseReference(s)
         } else {
+            val target = alt!!
+            pack(r, target, s)
+            lap("pack")
+            gray(target, altPyr)
+            lap("pyramid")
             alignLevels()
             lap("align")
-            if (frames == 1) estimateNoise(s)
             merge()
             lap("merge")
         }
@@ -154,6 +166,73 @@ class MultiFrameProcessor {
         laps.clear()
     }
 
+    /** Picks the sharpest held frame as reference, then merges the other held frames into it. */
+    private fun chooseReference(s: BurstSetup) {
+        if (refChosen || held.isEmpty()) return
+        val best = sharpness.indices.maxBy { sharpness[it] }
+        Log.i(TAG, "reference frame $best of ${held.size}, sharpness ${sharpness.map { String.format(java.util.Locale.US, "%.3g", it) }}")
+        ref = held[best]
+        gray(ref!!, refPyr)
+        run {
+            val p = program("init", Shaders.INIT)
+            p.use()
+            ref!!.bindImage(0, GLES31.GL_READ_ONLY)
+            accs!![0].bindImage(1, GLES31.GL_WRITE_ONLY)
+            accCur = 0
+            weight!!.bindImage(2, GLES31.GL_WRITE_ONLY)
+            p.dispatch(ref!!.width, ref!!.height)
+        }
+        var noiseDone = false
+        val others = held.filterIndexed { i, _ -> i != best }
+        for (q in others) {
+            alt = q
+            gray(q, altPyr)
+            alignLevels()
+            if (!noiseDone) {
+                estimateNoise(s)
+                noiseDone = true
+            }
+            merge()
+        }
+        // Later frames reuse one held texture; any other one stays as a spare for the finish.
+        alt = others.firstOrNull() ?: Tex(ref!!.width, ref!!.height, GLES31.GL_RGBA16F)
+        spare = others.getOrNull(1)
+        held = ArrayList()
+        refChosen = true
+        this.noiseEstimated = noiseDone
+    }
+
+    private var noiseEstimated = false
+
+    /** Mean squared Laplacian of the grey image (higher is sharper). */
+    private fun measureSharpness(q: Tex): Double {
+        gray(q, altPyr, levels = 1)
+        if (sharpBuffer == 0) {
+            val ids = IntArray(1)
+            GLES31.glGenBuffers(1, ids, 0)
+            sharpBuffer = ids[0]
+        }
+        GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, sharpBuffer)
+        val zeros = ByteBuffer.allocateDirect(SHARP_BINS * 4).order(ByteOrder.nativeOrder())
+        GLES31.glBufferData(GLES31.GL_SHADER_STORAGE_BUFFER, SHARP_BINS * 4, zeros, GLES31.GL_DYNAMIC_READ)
+        GLES31.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, 3, sharpBuffer)
+        val p = program("sharpness", Shaders.SHARPNESS)
+        p.use()
+        altPyr[0].bindImage(0, GLES31.GL_READ_ONLY)
+        val g = altPyr[0]
+        p.dispatch((g.width + 1) / 2, (g.height + 1) / 2)
+        GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, sharpBuffer)
+        val mapped = GLES31.glMapBufferRange(GLES31.GL_SHADER_STORAGE_BUFFER, 0, SHARP_BINS * 4, GLES31.GL_MAP_READ_BIT) as ByteBuffer
+        val ints = IntArray(SHARP_BINS)
+        mapped.order(ByteOrder.nativeOrder()).asIntBuffer().get(ints)
+        GLES31.glUnmapBuffer(GLES31.GL_SHADER_STORAGE_BUFFER)
+        var sum = 0.0
+        for (v in ints) sum += (v.toLong() and 0xffffffffL).toDouble()
+        return sum
+    }
+
+    private var sharpBuffer = 0
+
     /** Finishes the merged image; returns an upright ARGB bitmap. */
     fun finish(
         gains: RggbChannelVector,
@@ -161,6 +240,7 @@ class MultiFrameProcessor {
         shading: LensShadingMap?,
     ): Bitmap {
         val s = setup ?: error("no burst")
+        if (!refChosen) chooseReference(s)
         val t0 = SystemClock.elapsedRealtime()
         val qw = s.width / 2
         val qh = s.height / 2
@@ -275,12 +355,12 @@ class MultiFrameProcessor {
             p.setMat3("uCcm", ccmRows)
             p.set("uGain", gainUse)
             p.set("uChroma", if (o.chromaDenoise) chromaStrength(s.iso, s.gain) else 0f)
-            p.set("uCompress", 0.72f)
-            p.set("uLift", 0.94f)
+            p.set("uCompress", if (o.vivid) 0.66f else 0.72f)
+            p.set("uLift", if (o.vivid) 0.9f else 0.94f)
             p.set("uAnchor", -2.5f)
-            p.set("uBlack", 0.012f)
-            p.set("uContrast", 0.35f)
-            p.set("uSat", 1.15f)
+            p.set("uBlack", if (o.vivid) 0.016f else 0.012f)
+            p.set("uContrast", if (o.vivid) 0.45f else 0.35f)
+            p.set("uSat", if (o.vivid) 1.3f else 1.15f)
             p.set("uLocal", if (o.localTone) 1f else 0f)
             p.dispatch(s.width, s.height)
         }
@@ -289,6 +369,7 @@ class MultiFrameProcessor {
         keep?.release()
         alt?.release(); alt = null
         ref?.release(); ref = null
+        spare?.release(); spare = null
 
         val rotated = s.rotation == 90 || s.rotation == 270
         val cw = s.width - 2 * s.crop
@@ -331,6 +412,8 @@ class MultiFrameProcessor {
         programs.clear()
         if (histBuffer != 0) GLES31.glDeleteBuffers(1, intArrayOf(histBuffer), 0)
         histBuffer = 0
+        if (sharpBuffer != 0) GLES31.glDeleteBuffers(1, intArrayOf(sharpBuffer), 0)
+        sharpBuffer = 0
         gl?.release()
         gl = null
     }
@@ -371,7 +454,7 @@ class MultiFrameProcessor {
         return out
     }
 
-    private fun gray(quad: Tex, pyr: List<Tex>) {
+    private fun gray(quad: Tex, pyr: List<Tex>, levels: Int = pyr.size) {
         val g = program("gray", Shaders.GRAY)
         g.use()
         quad.bindImage(0, GLES31.GL_READ_ONLY)
@@ -379,7 +462,7 @@ class MultiFrameProcessor {
         g.dispatch(pyr[0].width, pyr[0].height)
         val d = program("down", Shaders.DOWN)
         d.use()
-        for (i in 1 until pyr.size) {
+        for (i in 1 until levels) {
             pyr[i - 1].bindImage(0, GLES31.GL_READ_ONLY)
             pyr[i].bindImage(1, GLES31.GL_WRITE_ONLY)
             d.set("uF", LEVELS[i].factor)
@@ -517,7 +600,10 @@ class MultiFrameProcessor {
     }
 
     private fun releaseFrames() {
-        listOfNotNull(raw, ref, alt, decision, weight).forEach { it.release() }
+        listOfNotNull(raw, ref, alt, spare, decision, weight).forEach { it.release() }
+        held.forEach { it.release() }
+        held = ArrayList()
+        spare = null
         accs?.forEach { it.release() }
         accs = null
         decision = null
@@ -531,6 +617,9 @@ class MultiFrameProcessor {
     companion object {
         private const val TAG = "ArcoMerge"
         private const val HIST = 16 * 64
+        private const val SHARP_BINS = 256
+        /** Frames held to choose the reference from. */
+        private const val HOLD = 3
         private const val PROFILE = false
 
         /** Pyramid: quad resolution, then /2, /4, /4 (as in HDR+). Tile 16 at the finest level. */

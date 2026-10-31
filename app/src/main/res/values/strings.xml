@@ -16,4 +16,6 @@
     <string name="settings_mf_chroma">Colour noise reduction</string>
     <string name="settings_mf_sharpen">Sharpening</string>
     <string name="settings_mf_denoise">Noise reduction</string>
+    <string name="settings_mf_vivid">Vivid colours</string>
+    <string name="badge_still">NIGHT · STILL</string>
 </resources>

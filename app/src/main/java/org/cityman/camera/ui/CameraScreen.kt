@@ -169,6 +169,7 @@ fun CameraScreen(
                 )
             }
             if (st.saveDng && st.mode == CaptureMode.PHOTO && !st.multiFrame) Badge("RAW")
+            if (st.multiFrame && st.still && st.mode == CaptureMode.PHOTO) Badge(stringResource(R.string.badge_still))
             if (st.zoom > 1.01f) Badge(String.format(Locale.US, "%.1f×", st.zoom))
             if (st.focusPoint != null) Badge(stringResource(R.string.badge_locked))
         }
@@ -552,12 +553,13 @@ private fun SettingsPanel(
             if (state.multiFrame) {
                 SectionTitle(stringResource(R.string.settings_mf_frames))
                 Row(Modifier.padding(horizontal = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    for (n in listOf(0, 4, 6, 8)) {
+                    for (n in listOf(0, 4, 6, 8, 12)) {
                         Pill(if (n == 0) stringResource(R.string.settings_auto) else n.toString(), state.mfFrames == n) { onFrames(n) }
                     }
                 }
                 val o = state.mfOptions
                 ToggleRow(stringResource(R.string.settings_mf_denoise), o.denoise) { onOptions(o.copy(denoise = !o.denoise)) }
+                ToggleRow(stringResource(R.string.settings_mf_vivid), o.vivid) { onOptions(o.copy(vivid = !o.vivid)) }
                 ToggleRow(stringResource(R.string.settings_mf_tone), o.localTone) { onOptions(o.copy(localTone = !o.localTone)) }
                 ToggleRow(stringResource(R.string.settings_mf_chroma), o.chromaDenoise) { onOptions(o.copy(chromaDenoise = !o.chromaDenoise)) }
                 ToggleRow(stringResource(R.string.settings_mf_sharpen), o.sharpen) { onOptions(o.copy(sharpen = !o.sharpen)) }

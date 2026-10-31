@@ -168,6 +168,25 @@ void main() {
 }
 """
 
+    /**
+     * Sharpness of a grey image: squared Laplacian on every other pixel, summed into 256
+     * partial sums (fixed point) to keep the 32-bit atomics from overflowing.
+     */
+    val SHARPNESS = GRID + """
+layout(r32f, binding = 0) readonly uniform image2D uGray;
+layout(std430, binding = 3) buffer Sums { uint s[]; };
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy) * 2 + 1;
+    ivec2 sz = imageSize(uGray) - 2;
+    if (any(greaterThan(p, sz))) return;
+    float c = imageLoad(uGray, p).r;
+    float lap = 4.0 * c - imageLoad(uGray, p + ivec2(1, 0)).r - imageLoad(uGray, p - ivec2(1, 0)).r
+              - imageLoad(uGray, p + ivec2(0, 1)).r - imageLoad(uGray, p - ivec2(0, 1)).r;
+    uint v = uint(min(lap * lap * 1.0e5, 4.0e4));
+    atomicAdd(s[(gl_WorkGroupID.x + gl_WorkGroupID.y * 7u) & 255u], v);
+}
+"""
+
     /** Accumulator = reference, weight 1. */
     val INIT = GRID + """
 layout(rgba16f, binding = 0) readonly uniform image2D uRef;
