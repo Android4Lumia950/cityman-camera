@@ -485,9 +485,12 @@ void main() {
     vec3 lin = uCcm * rgb;
     vec3 blur = uCcm * texture(uHalfBlur, uv).rgb;
     const vec3 LUM = vec3(0.2126, 0.7152, 0.0722);
-    float y = max(dot(lin, LUM), 0.0);
-    float yb = max(dot(blur, LUM), 1.0e-6);
-    lin = max(mix(lin, blur * (y / yb), uChroma), 0.0);
+    // Colour from the blurred image, luminance from the full-resolution one. Added as a
+    // difference, not a ratio: in very dark, noisy corners the blurred luminance can be zero
+    // or negative after the colour matrix, and a ratio would blow up into bright speckles.
+    float y = dot(lin, LUM);
+    float yb = dot(blur, LUM);
+    lin = max(mix(lin, blur + vec3(y - yb), uChroma), 0.0);
 
     lin *= uGain;
     float l = max(dot(lin, LUM), 1.0e-6);
