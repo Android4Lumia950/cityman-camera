@@ -9,4 +9,11 @@
     <string name="permission_needed">Arco needs the camera to take photos. The microphone is used for video sound.</string>
     <string name="permission_grant">Allow</string>
     <string name="no_viewer">No app can open this file</string>
+    <string name="settings_mf">Multi-frame processing (RAW burst)</string>
+    <string name="settings_mf_frames">FRAMES PER PHOTO</string>
+    <string name="settings_auto">Auto</string>
+    <string name="settings_mf_tone">Local tone mapping</string>
+    <string name="settings_mf_chroma">Colour noise reduction</string>
+    <string name="settings_mf_sharpen">Sharpening</string>
+    <string name="settings_mf_denoise">Noise reduction</string>
 </resources>

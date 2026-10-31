@@ -29,6 +29,14 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import org.cityman.camera.processing.ProcessingOptions
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -88,7 +96,6 @@ fun CameraScreen(
     val st by controller.state.collectAsStateWithLifecycle()
     var openDial by remember { mutableStateOf<DialKind?>(null) }
     var showSettings by remember { mutableStateOf(false) }
-    var showGrid by rememberSaveable { mutableStateOf(false) }
     val rotation by animateFloatAsState(iconRotation, tween(250), label = "iconRotation")
 
     // A dial belongs to one camera: close it when the camera or mode changes.
@@ -115,7 +122,7 @@ fun CameraScreen(
         Viewfinder(
             controller = controller,
             state = st,
-            showGrid = showGrid,
+            showGrid = st.grid,
             onTap = { x, y ->
                 if (openDial != null || showSettings) {
                     openDial = null
@@ -153,7 +160,15 @@ fun CameraScreen(
             RoundButton(onClick = { showSettings = !showSettings; openDial = null }) {
                 GlyphIcon(Glyph.SETTINGS, Modifier.rotate(rotation), size = 26.dp)
             }
-            if (st.saveDng && st.mode == CaptureMode.PHOTO) Badge("RAW")
+            if (st.mode == CaptureMode.PHOTO && st.caps?.rawSize != null) {
+                // Quick switch for multi-frame processing.
+                Badge(
+                    "MF",
+                    on = st.multiFrame,
+                    modifier = Modifier.clip(RoundedCornerShape(4.dp)).clickable { controller.setMultiFrame(!st.multiFrame) },
+                )
+            }
+            if (st.saveDng && st.mode == CaptureMode.PHOTO && !st.multiFrame) Badge("RAW")
             if (st.zoom > 1.01f) Badge(String.format(Locale.US, "%.1f×", st.zoom))
             if (st.focusPoint != null) Badge(stringResource(R.string.badge_locked))
         }
@@ -209,10 +224,13 @@ fun CameraScreen(
         ) {
             SettingsPanel(
                 state = st,
-                showGrid = showGrid,
-                onGrid = { showGrid = it },
+                maxHeight = h - 80.dp,
+                onGrid = { controller.setGrid(it) },
                 onDng = { controller.setSaveDng(it) },
                 onFormat = { controller.setFormat(it) },
+                onMultiFrame = { controller.setMultiFrame(it) },
+                onFrames = { controller.setMultiFrameFrames(it) },
+                onOptions = { controller.setMultiFrameOptions(it) },
             )
         }
 
@@ -395,6 +413,7 @@ private fun ShutterBar(
             mode = state.mode,
             recording = state.recording,
             busy = state.capturing,
+            processing = state.processing,
             onClick = onShutter,
             modifier = Modifier.align(Alignment.Center),
         )
@@ -422,7 +441,9 @@ private fun ShutterBar(
 }
 
 @Composable
-private fun ShutterButton(mode: CaptureMode, recording: Boolean, busy: Boolean, onClick: () -> Unit, modifier: Modifier) {
+private fun ShutterButton(mode: CaptureMode, recording: Boolean, busy: Boolean, processing: Boolean, onClick: () -> Unit, modifier: Modifier) {
+    val spin = rememberInfiniteTransition(label = "processing")
+    val angle by spin.animateFloat(0f, 360f, infiniteRepeatable(tween(900, easing = LinearEasing)), label = "spin")
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed) 0.9f else 1f, tween(90), label = "shutterScale")
@@ -435,6 +456,14 @@ private fun ShutterButton(mode: CaptureMode, recording: Boolean, busy: Boolean, 
     ) {
         val r = size.minDimension / 2
         drawCircle(Color.White, radius = r - 2.dp.toPx(), style = Stroke(4.dp.toPx()))
+        if (processing) {
+            val inset = 2.dp.toPx()
+            drawArc(
+                Accent, startAngle = angle, sweepAngle = 100f, useCenter = false,
+                topLeft = Offset(inset, inset), size = androidx.compose.ui.geometry.Size(size.width - 2 * inset, size.height - 2 * inset),
+                style = Stroke(4.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round),
+            )
+        }
         when {
             recording -> {
                 val s = r * 0.7f
@@ -463,11 +492,14 @@ private fun RoundButton(onClick: () -> Unit, modifier: Modifier = Modifier, cont
 }
 
 @Composable
-private fun Badge(text: String) {
+private fun Badge(text: String, on: Boolean = true, modifier: Modifier = Modifier) {
     BasicText(
         text,
-        style = TextStyle(color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp),
-        modifier = Modifier.background(Accent, RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
+        style = TextStyle(color = if (on) Color.Black else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp),
+        modifier = modifier
+            .background(if (on) Accent else Color.Black.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
+            .border(1.dp, if (on) Accent else Color.White.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+            .padding(horizontal = 6.dp, vertical = 2.dp),
     )
 }
 
@@ -497,28 +529,44 @@ private fun RecordingTimer(since: Long, modifier: Modifier) {
 @Composable
 private fun SettingsPanel(
     state: CameraState,
-    showGrid: Boolean,
+    maxHeight: androidx.compose.ui.unit.Dp,
     onGrid: (Boolean) -> Unit,
     onDng: (Boolean) -> Unit,
     onFormat: (PhotoFormat) -> Unit,
+    onMultiFrame: (Boolean) -> Unit,
+    onFrames: (Int) -> Unit,
+    onOptions: (ProcessingOptions) -> Unit,
 ) {
     val caps = state.caps
     Column(
         Modifier
             .width(300.dp)
+            .heightIn(max = maxHeight)
             .background(Color(0xF0141414), RoundedCornerShape(12.dp))
+            .verticalScroll(rememberScrollState())
             .padding(vertical = 6.dp),
     ) {
-        ToggleRow(stringResource(R.string.settings_grid), showGrid) { onGrid(!showGrid) }
+        ToggleRow(stringResource(R.string.settings_grid), state.grid) { onGrid(!state.grid) }
         if (caps?.rawSize != null && state.mode == CaptureMode.PHOTO) {
-            ToggleRow(stringResource(R.string.settings_dng), state.saveDng) { onDng(!state.saveDng) }
+            ToggleRow(stringResource(R.string.settings_mf), state.multiFrame) { onMultiFrame(!state.multiFrame) }
+            if (state.multiFrame) {
+                SectionTitle(stringResource(R.string.settings_mf_frames))
+                Row(Modifier.padding(horizontal = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    for (n in listOf(0, 4, 6, 8)) {
+                        Pill(if (n == 0) stringResource(R.string.settings_auto) else n.toString(), state.mfFrames == n) { onFrames(n) }
+                    }
+                }
+                val o = state.mfOptions
+                ToggleRow(stringResource(R.string.settings_mf_denoise), o.denoise) { onOptions(o.copy(denoise = !o.denoise)) }
+                ToggleRow(stringResource(R.string.settings_mf_tone), o.localTone) { onOptions(o.copy(localTone = !o.localTone)) }
+                ToggleRow(stringResource(R.string.settings_mf_chroma), o.chromaDenoise) { onOptions(o.copy(chromaDenoise = !o.chromaDenoise)) }
+                ToggleRow(stringResource(R.string.settings_mf_sharpen), o.sharpen) { onOptions(o.copy(sharpen = !o.sharpen)) }
+            } else {
+                ToggleRow(stringResource(R.string.settings_dng), state.saveDng) { onDng(!state.saveDng) }
+            }
         }
         if (caps != null && state.mode == CaptureMode.PHOTO) {
-            BasicText(
-                stringResource(R.string.settings_format),
-                style = TextStyle(color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp, letterSpacing = 1.sp),
-                modifier = Modifier.padding(start = 16.dp, top = 10.dp, bottom = 4.dp),
-            )
+            SectionTitle(stringResource(R.string.settings_format))
             Row(Modifier.padding(horizontal = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 val formats = PhotoFormat.entries.distinctBy { caps.jpegSize(it) }
                 for (f in formats) {
@@ -547,6 +595,28 @@ private fun SettingsPanel(
             Spacer(Modifier.height(8.dp))
         }
     }
+}
+
+@Composable
+private fun SectionTitle(text: String) {
+    BasicText(
+        text,
+        style = TextStyle(color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp, letterSpacing = 1.sp),
+        modifier = Modifier.padding(start = 16.dp, top = 10.dp, bottom = 4.dp),
+    )
+}
+
+@Composable
+private fun Pill(label: String, selected: Boolean, onClick: () -> Unit) {
+    BasicText(
+        label,
+        style = TextStyle(color = if (selected) Color.Black else Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium),
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (selected) Accent else Color.White.copy(alpha = 0.08f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+    )
 }
 
 @Composable

@@ -9,7 +9,7 @@ import org.cityman.camera.camera.ManualControls
  * Debug builds only: drive the camera from adb without touching the screen, while the app is
  * in the foreground, e.g.
  * `adb shell am broadcast -a org.cityman.camera.DEBUG --ez dng true --ei iso 200 --ez shoot true`.
- * Extras: dng (bool), iso (int, 0 = auto), shutter_us (long, 0 = auto), wb (int K, 0 = auto),
+ * Extras: dng (bool), mf (bool), frames (int, 0 = auto), iso (int, 0 = auto), shutter_us (long, 0 = auto), wb (int K, 0 = auto),
  * focus (float diopters, -1 = auto), ev (int steps), reset (bool), mode (photo|video), shoot (bool).
  */
 object DebugCommands {
@@ -19,6 +19,8 @@ object DebugCommands {
         val extras = intent.extras ?: return
         val st = controller.state.value
         if (extras.containsKey("dng")) controller.setSaveDng(extras.getBoolean("dng"))
+        if (extras.containsKey("mf")) controller.setMultiFrame(extras.getBoolean("mf"))
+        if (extras.containsKey("frames")) controller.setMultiFrameFrames(extras.getInt("frames"))
         when (extras.getString("mode")) {
             "photo" -> controller.setMode(CaptureMode.PHOTO)
             "video" -> controller.setMode(CaptureMode.VIDEO)

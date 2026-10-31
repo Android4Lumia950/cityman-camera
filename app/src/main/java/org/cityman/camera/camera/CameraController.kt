@@ -17,7 +17,9 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.DngCreator
 import android.hardware.camera2.TotalCaptureResult
+import android.hardware.camera2.params.ColorSpaceTransform
 import android.hardware.camera2.params.MeteringRectangle
+import android.hardware.camera2.params.RggbChannelVector
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.media.ExifInterface
@@ -38,6 +40,9 @@ import android.view.OrientationEventListener
 import android.view.Surface
 import android.view.SurfaceHolder
 import kotlinx.coroutines.flow.MutableStateFlow
+import org.cityman.camera.processing.BurstSetup
+import org.cityman.camera.processing.MultiFrameProcessor
+import org.cityman.camera.processing.ProcessingOptions
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import java.io.File
@@ -59,6 +64,13 @@ data class CameraState(
     val mode: CaptureMode = CaptureMode.PHOTO,
     val format: PhotoFormat = PhotoFormat.FULL,
     val saveDng: Boolean = false,
+    val grid: Boolean = false,
+    /** Multi-frame RAW processing for photos, and its options. */
+    val multiFrame: Boolean = false,
+    /** Burst length, 0 = chosen from the light. */
+    val mfFrames: Int = 0,
+    val mfOptions: ProcessingOptions = ProcessingOptions(),
+    val processing: Boolean = false,
     val controls: ManualControls = ManualControls(),
     val live: LiveValues = LiveValues(),
     val previewSize: Size? = null,
@@ -88,13 +100,31 @@ class CameraController(private val context: Context) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val camExecutor = Executor { camHandler.post(it) }
     private val store = MediaStoreWriter(context)
+    private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+    private val gpuThread = HandlerThread("arco-gpu").apply { start() }
+    private val gpuHandler = Handler(gpuThread.looper)
+    private val processor = MultiFrameProcessor()
     private val sound = MediaActionSound().apply {
         load(MediaActionSound.SHUTTER_CLICK)
         load(MediaActionSound.START_VIDEO_RECORDING)
         load(MediaActionSound.STOP_VIDEO_RECORDING)
     }
 
-    private val _state = MutableStateFlow(CameraState())
+    private val _state = MutableStateFlow(
+        CameraState(
+            saveDng = prefs.getBoolean("dng", false),
+            grid = prefs.getBoolean("grid", false),
+            format = runCatching { PhotoFormat.valueOf(prefs.getString("format", null) ?: "FULL") }.getOrDefault(PhotoFormat.FULL),
+            multiFrame = prefs.getBoolean("mf", false),
+            mfFrames = prefs.getInt("mfFrames", 0),
+            mfOptions = ProcessingOptions(
+                denoise = prefs.getBoolean("mfDenoise", true),
+                localTone = prefs.getBoolean("mfLocalTone", true),
+                chromaDenoise = prefs.getBoolean("mfChroma", true),
+                sharpen = prefs.getBoolean("mfSharpen", true),
+            ),
+        ),
+    )
     val state: StateFlow<CameraState> = _state
 
     /** Back cameras first, then front ones. */
@@ -173,7 +203,7 @@ class CameraController(private val context: Context) {
     private var afTriggeredForShot = false
     private var shot: Shot? = null
 
-    private class Shot(val orientation: Int, val rawExpected: Boolean, val startedAt: Long) {
+    private class Shot(val orientation: Int, val rawExpected: Boolean, val startedAt: Long, val burst: Boolean = false) {
         var jpegDone = false
         var rawDone = false
         var raw: Image? = null
@@ -201,6 +231,8 @@ class CameraController(private val context: Context) {
             recorderSurface?.release()
             recorderSurface = null
         }
+        gpuHandler.post { processor.release() }
+        gpuThread.quitSafely()
         camThread.quitSafely()
         ioThread.quitSafely()
         sound.release()
@@ -232,12 +264,41 @@ class CameraController(private val context: Context) {
 
     fun setFormat(format: PhotoFormat) = camHandler.post {
         if (_state.value.format == format) return@post
+        prefs.edit().putString("format", format.name).apply()
         _state.update { it.copy(format = format) }
         if (_state.value.mode == CaptureMode.PHOTO) reconfigure()
     }
 
+    fun setGrid(enabled: Boolean) {
+        prefs.edit().putBoolean("grid", enabled).apply()
+        _state.update { it.copy(grid = enabled) }
+    }
+
+    fun setMultiFrame(enabled: Boolean) = camHandler.post {
+        if (_state.value.multiFrame == enabled) return@post
+        prefs.edit().putBoolean("mf", enabled).apply()
+        _state.update { it.copy(multiFrame = enabled) }
+        if (_state.value.mode == CaptureMode.PHOTO) reconfigure()
+    }
+
+    fun setMultiFrameFrames(frames: Int) {
+        prefs.edit().putInt("mfFrames", frames).apply()
+        _state.update { it.copy(mfFrames = frames) }
+    }
+
+    fun setMultiFrameOptions(o: ProcessingOptions) {
+        prefs.edit()
+            .putBoolean("mfDenoise", o.denoise)
+            .putBoolean("mfLocalTone", o.localTone)
+            .putBoolean("mfChroma", o.chromaDenoise)
+            .putBoolean("mfSharpen", o.sharpen)
+            .apply()
+        _state.update { it.copy(mfOptions = o) }
+    }
+
     fun setSaveDng(enabled: Boolean) = camHandler.post {
         if (_state.value.saveDng == enabled) return@post
+        prefs.edit().putBoolean("dng", enabled).apply()
         _state.update { it.copy(saveDng = enabled) }
         if (_state.value.mode == CaptureMode.PHOTO) reconfigure()
     }
@@ -431,8 +492,10 @@ class CameraController(private val context: Context) {
                 outputs += OutputConfiguration(it.surface)
             }
             val rs = c.rawSize
-            if (st.saveDng && rs != null) {
-                rawReader = ImageReader.newInstance(rs.width, rs.height, ImageFormat.RAW_SENSOR, 2).also {
+            if ((st.saveDng || st.multiFrame) && rs != null) {
+                // A burst can queue its frames here while the GPU merges them one by one.
+                val images = if (st.multiFrame) MAX_BURST + 1 else 2
+                rawReader = ImageReader.newInstance(rs.width, rs.height, ImageFormat.RAW_SENSOR, images).also {
                     it.setOnImageAvailableListener(::onRaw, ioHandler)
                     outputs += OutputConfiguration(it.surface)
                 }
@@ -459,8 +522,8 @@ class CameraController(private val context: Context) {
                     Log.e(TAG, "session configuration failed (raw=$withRaw)")
                     if (gen != configGen) return
                     if (withRaw) {
-                        _state.update { it.copy(saveDng = false) }
-                        report("DNG is not available together with this photo size")
+                        _state.update { it.copy(saveDng = false, multiFrame = false) }
+                        report("RAW is not available together with this photo size")
                         reconfigure()
                     } else {
                         report("Could not start the camera session")
@@ -683,10 +746,11 @@ class CameraController(private val context: Context) {
         if (session == null || jpegReader == null) return
         val current = shot
         if (current != null) {
-            if (SystemClock.elapsedRealtime() - current.startedAt < 15_000) return
+            if (SystemClock.elapsedRealtime() - current.startedAt < 30_000) return
             finishShot(force = true)
         }
-        shot = Shot(jpegOrientation(c), rawReader != null, SystemClock.elapsedRealtime())
+        val mf = _state.value.multiFrame && rawReader != null
+        shot = Shot(jpegOrientation(c), rawReader != null && !mf, SystemClock.elapsedRealtime(), mf)
         _state.update { it.copy(capturing = true) }
         val needAf = c.hasAutoFocus && controls.focusDiopters == null && focusRegion == null &&
             afState != CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED &&
@@ -703,6 +767,10 @@ class CameraController(private val context: Context) {
 
     private fun fireStill() {
         camHandler.removeCallbacks(afTimeout)
+        if (shot?.burst == true) {
+            fireBurst()
+            return
+        }
         val s = session
         val dev = device
         val jpeg = jpegReader
@@ -792,6 +860,11 @@ class CameraController(private val context: Context) {
         } catch (e: Exception) {
             null
         } ?: return
+        val job = burst
+        if (job != null) {
+            gpuHandler.post { burstFrame(job, image) }
+            return
+        }
         val current = shot
         if (current == null) {
             image.close()
@@ -836,10 +909,228 @@ class CameraController(private val context: Context) {
         val done = synchronized(current) { current.jpegDone && (!current.rawExpected || current.rawDone) }
         if (!done && !force) return
         if (force) synchronized(current) { current.raw?.close(); current.raw = null }
+        if (force && current.burst) {
+            burst?.let { job ->
+                job.failed = true
+                gpuHandler.post { maybeFinishBurst(job) }
+            }
+            burst = null
+        }
         shot = null
         waitingAf = false
         camHandler.removeCallbacks(afTimeout)
-        _state.update { it.copy(capturing = false) }
+        _state.update { it.copy(capturing = false, processing = false) }
+    }
+
+    // ---- multi-frame burst ------------------------------------------------------------
+
+    private class Burst(val total: Int, val setup: BurstSetup) {
+        /** gpu thread */
+        var received = 0
+        @Volatile var failed = false
+        var finished = false
+        @Volatile var expected = total
+        @Volatile var firstResult: TotalCaptureResult? = null
+    }
+
+    @Volatile private var burst: Burst? = null
+
+    private data class BurstPlan(val iso: Int, val exposureNs: Long, val gain: Float, val frames: Int)
+
+    /**
+     * Exposure of the burst frames. Automatic: 0.7 EV under what auto exposure measured (to keep
+     * highlights), shutter at most 1/15 s, ISO within what the HAL accepts manually; whatever is
+     * missing becomes digital gain after the merge, where the noise is lower.
+     */
+    private fun burstPlan(c: CameraCaps): BurstPlan {
+        val m = controls
+        val isoRange = c.isoRange
+        val expRange = c.exposureRange
+        val (iso, exposure, gain) = if (m.iso != null || m.exposureNs != null || isoRange == null || expRange == null) {
+            val (i, e) = manualExposure(c, m)
+            Triple(i, e, 1f)
+        } else {
+            val ev = 2.0.pow(m.evSteps * c.evStep.toDouble())
+            val product = autoIso.toDouble() * autoExposureNs * ev
+            val target = product * 2.0.pow(-BURST_UNDER_EV)
+            // Shortest shutter that reaches the target at the highest manual ISO, between 1/15 s and,
+            // in low light, 1/6 s (the rear lens is stabilised); below that, digital gain.
+            val atMaxIso = (target / isoRange.upper).toLong()
+            val cap = atMaxIso.coerceIn(BURST_MAX_SHUTTER_NS, BURST_LOW_LIGHT_SHUTTER_NS)
+            val exp = (target / isoRange.lower).toLong().coerceIn(expRange.lower, min(cap, expRange.upper))
+            val i = (target / exp).roundToInt().coerceIn(isoRange.lower, isoRange.upper)
+            Triple(i, exp, (product / (i.toDouble() * exp)).toFloat().coerceIn(1f, 64f))
+        }
+        val chosen = _state.value.mfFrames
+        val frames = when {
+            chosen > 0 -> chosen
+            gain >= 1.8f || (isoRange != null && iso >= isoRange.upper * 0.9) -> 8
+            else -> 6
+        }.coerceIn(2, MAX_BURST)
+        return BurstPlan(iso, exposure, gain, frames)
+    }
+
+    private fun cfaChannels(c: CameraCaps): IntArray = when (c.chars[CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT]) {
+        CameraMetadata.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_GRBG -> intArrayOf(1, 0, 3, 2)
+        CameraMetadata.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_GBRG -> intArrayOf(1, 3, 0, 2)
+        CameraMetadata.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_BGGR -> intArrayOf(3, 1, 2, 0)
+        else -> intArrayOf(0, 1, 2, 3)
+    }
+
+    /** cam thread */
+    private fun fireBurst() {
+        val c = caps
+        val s = session
+        val dev = device
+        val raw = rawReader
+        val preview = previewSurface
+        val current = shot
+        if (c == null || s == null || dev == null || raw == null || preview == null || current == null) {
+            finishShot(force = true)
+            return
+        }
+        val plan = burstPlan(c)
+        val pattern = c.chars[CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN]
+        val black = FloatArray(4) { i -> (pattern?.getOffsetForIndex(i % 2, i / 2) ?: 64).toFloat() }
+        val white = (c.chars[CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL] ?: 1023).toFloat()
+        val setup = BurstSetup(
+            width = raw.width, height = raw.height, chanAt = cfaChannels(c), black = black, white = white,
+            gain = plan.gain, rotation = current.orientation, iso = plan.iso, options = _state.value.mfOptions,
+        )
+        val job = Burst(plan.frames, setup)
+        Log.i(TAG, "burst ${plan.frames} × ISO ${plan.iso} ${plan.exposureNs / 1000} µs, gain ${plan.gain}")
+        gpuHandler.post {
+            try {
+                processor.begin(setup)
+            } catch (e: Throwable) {
+                Log.e(TAG, "GPU setup", e)
+                job.failed = true
+            }
+        }
+        burst = job
+        try {
+            val awbAuto = controls.wbKelvin == null
+            val requests = (0 until plan.frames).map {
+                val b = dev.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+                b.addTarget(raw.surface)
+                b.addTarget(preview)
+                applyControls(b, still = false)
+                b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
+                b.set(CaptureRequest.SENSOR_SENSITIVITY, plan.iso)
+                b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, plan.exposureNs)
+                b.set(CaptureRequest.SENSOR_FRAME_DURATION, plan.exposureNs)
+                if (awbAuto) b.set(CaptureRequest.CONTROL_AWB_LOCK, true)
+                b.set(CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE, CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON)
+                b.build()
+            }
+            s.captureBurst(requests, burstCallback(job), camHandler)
+        } catch (e: Exception) {
+            Log.e(TAG, "burst capture", e)
+            report("Capture failed: ${e.message}")
+            burst = null
+            gpuHandler.post { processor.abort() }
+            finishShot(force = true)
+        }
+    }
+
+    private fun burstCallback(job: Burst) = object : CameraCaptureSession.CaptureCallback() {
+        private var started = false
+
+        override fun onCaptureStarted(s: CameraCaptureSession, request: CaptureRequest, timestamp: Long, frameNumber: Long) {
+            if (started) return
+            started = true
+            sound.play(MediaActionSound.SHUTTER_CLICK)
+            _state.update { it.copy(shutterCount = it.shutterCount + 1, processing = true) }
+        }
+
+        override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+            if (job.firstResult == null) {
+                job.firstResult = result
+                gpuHandler.post { maybeFinishBurst(job) }
+            }
+        }
+
+        override fun onCaptureFailed(s: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+            Log.w(TAG, "burst frame failed: reason ${failure.reason}")
+            job.expected--
+            gpuHandler.post { maybeFinishBurst(job) }
+        }
+
+        override fun onCaptureSequenceCompleted(s: CameraCaptureSession, sequenceId: Int, frameNumber: Long) {
+            if (afTriggeredForShot) {
+                afTriggeredForShot = false
+                cancelAfTrigger()
+            }
+        }
+    }
+
+    /** gpu thread */
+    private fun burstFrame(job: Burst, image: Image) {
+        try {
+            if (!job.failed && !job.finished && job.received < job.total) processor.addFrame(image)
+        } catch (e: Throwable) {
+            Log.e(TAG, "merge frame", e)
+            job.failed = true
+        } finally {
+            image.close()
+        }
+        job.received++
+        maybeFinishBurst(job)
+    }
+
+    /** gpu thread */
+    private fun maybeFinishBurst(job: Burst) {
+        if (job.finished) return
+        val result = job.firstResult
+        if (!job.failed && (job.received < job.expected || result == null)) return
+        job.finished = true
+        burst = null
+        if (job.failed || result == null || job.received == 0) {
+            processor.abort()
+            report("Multi-frame processing failed")
+            camHandler.post { if (shot?.burst == true) finishShot(force = true) }
+            return
+        }
+        val bitmap = try {
+            val gains = result[CaptureResult.COLOR_CORRECTION_GAINS] ?: RggbChannelVector(2f, 1f, 1f, 1.6f)
+            val ccm = result[CaptureResult.COLOR_CORRECTION_TRANSFORM]
+                ?: ColorSpaceTransform(intArrayOf(1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1))
+            processor.finish(gains, ccm, result[CaptureResult.STATISTICS_LENS_SHADING_CORRECTION_MAP])
+        } catch (e: Throwable) {
+            Log.e(TAG, "finish burst", e)
+            processor.abort()
+            null
+        }
+        // The GPU is free again: allow the next photo while this one is encoded and saved.
+        camHandler.post {
+            val current = shot
+            if (current?.burst == true) {
+                synchronized(current) { current.jpegDone = true }
+                finishShot(force = false)
+            }
+        }
+        ioHandler.post {
+            if (bitmap != null) saveBitmap(bitmap) else report("Multi-frame processing failed")
+        }
+    }
+
+    /** io thread */
+    private fun saveBitmap(bitmap: Bitmap) {
+        try {
+            val uri = store.createImage(store.baseName("IMG") + "_MF.jpg", "image/jpeg") ?: error("MediaStore insert failed")
+            val t0 = SystemClock.elapsedRealtime()
+            store.write(uri) { bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+            Log.i(TAG, "JPEG encode ${SystemClock.elapsedRealtime() - t0} ms")
+            store.publish(uri)
+            val scale = 256f / max(bitmap.width, bitmap.height)
+            val thumb = Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).roundToInt(), (bitmap.height * scale).roundToInt(), true)
+            bitmap.recycle()
+            _state.update { it.copy(thumbnail = thumb, lastUri = uri, lastIsVideo = false) }
+            Log.i(TAG, "saved $uri (multi-frame)")
+        } catch (e: Exception) {
+            Log.e(TAG, "save multi-frame", e)
+            report("Could not save the photo: ${e.message}")
+        }
     }
 
     // ---- video --------------------------------------------------------------------------
@@ -986,6 +1277,10 @@ class CameraController(private val context: Context) {
     companion object {
         private const val TAG = "ArcoCamera"
         private const val MAX_AUTO_SHUTTER_NS = 250_000_000L
+        private const val MAX_BURST = 8
+        private const val BURST_UNDER_EV = 0.7
+        private const val BURST_MAX_SHUTTER_NS = 66_666_666L
+        private const val BURST_LOW_LIGHT_SHUTTER_NS = 166_666_666L
 
         fun exifOrientation(degrees: Int) = when (degrees) {
             90 -> ExifInterface.ORIENTATION_ROTATE_90

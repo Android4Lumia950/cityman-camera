@@ -35,6 +35,8 @@ libraries in use require).
 - Hardware camera key: half press focuses, full press shoots. Volume keys also shoot.
 - Gallery thumbnail of the last photo or video, opens it in the system viewer.
 
+- Multi-frame RAW processing (see below), optional.
+
 Not in scope: Living Images and Movie Moments (dropped on request).
 
 ## Phone notes
@@ -106,17 +108,49 @@ Extras: `dng`, `iso` (0 = auto), `shutter_us`, `wb` (Kelvin, 0 = auto), `focus` 
 - `ui/CameraScreen.kt` — layout for both orientations, chips, shutter bar, settings.
 - `ui/Glyphs.kt` — the app's line icons.
 
-## Phase 2 (planned, not started)
+## Multi-frame processing (phase 2)
 
-Burst of 4–8 RAW frames, tile alignment, temporal merge, demosaic, tone mapping and sharpening
-on the GPU, tuned to the IMX230 (black level 64, white level 1023, colour matrices from the
-HAL, lens shading from `camera-sensors/rear-tuning` of the device tree). References to study:
-PhotonCamera, Tim Brooks's HDR+ Halide implementation and Open Camera's noise-reduction mode.
+Optional (settings, or the **MF** badge at the top left). When it is on, the shutter takes a burst
+of RAW frames and merges them on the GPU (OpenGL ES 3.1 compute shaders, `processing/`) into a
+20 MP JPEG (`IMG_…_MF.jpg`) from the full 5344×3744 sensor, instead of the HAL's 13 MP JPEG.
+
+1. **Exposure plan** (`CameraController.burstPlan`): 0.7 EV under what auto exposure measured,
+   to keep highlights; shutter at most 1/15 s, up to 1/6 s in low light (the rear lens has OIS);
+   ISO within the HAL's manual range (42–342 on the rear camera); whatever is missing becomes
+   digital gain after the merge. 6 frames, 8 in low light (or 4/6/8 from the settings). With
+   manual ISO or shutter set, the burst uses those values.
+2. **Merge**, frame by frame as they arrive (memory stays constant): black level, Bayer 2×2
+   blocks packed into one texel; grey pyramid (½, ¼, ¼); coarse-to-fine tile alignment (tiles
+   16/8 px, L1 at the finest level, L2 above); per 2×2 block, choice between the tile's offset and
+   the two nearest tiles' offsets, and a robustness weight from the local difference against the
+   noise expected at that brightness; weighted accumulation against the first frame.
+3. **Noise model**: measured on every burst from the first aligned pair (median absolute
+   difference per brightness bin, fit of variance = a·x + b), since the HAL reports no noise
+   profile.
+4. **Finishing**: lens shading map from the capture result, white balance gains and colour
+   matrix of the HAL's auto white balance, highlight clipping to a common level (no magenta
+   highlights), bilateral spatial noise reduction guided by the noise model and the number of
+   merged frames, Malvar-He-Cutler demosaic, colour noise reduction (full-resolution luminance
+   with blurred chroma), local tone mapping (log-luminance base layer, highlights compressed more
+   than shadows are lifted), black point, highlight shoulder, saturation, sRGB, S curve, luma
+   unsharp mask, rotation to upright.
+
+Every finishing step can be turned off in the settings: noise reduction, local tone mapping,
+colour noise reduction, sharpening.
+
+Timing on the phone (31/10/2026, 6 frames): about 0.3 s per frame for upload, alignment and
+merge (overlapping the capture), 1 s of GPU finishing, 0.3 s readback; the JPEG is encoded in the
+background (0.8–1.4 s) and the shutter is free again before that. With `PROFILE = true` in
+`MultiFrameProcessor.kt` the log (`adb logcat -s ArcoMerge`) shows each stage.
+
+Not done yet: DNG output in multi-frame mode, the HAL's hardware JPEG encoder (through YUV
+reprocessing) instead of the CPU one, super-resolution, a learned or frequency-domain merge.
 
 ## Licence
 
-GPL-3.0-or-later (see `LICENSE`). The app is GPL so that phase 2 can adapt code from GPL
-projects such as PhotonCamera and Open Camera, with attribution, if that turns out useful.
+GPL-3.0-or-later (see `LICENSE`). The app is GPL so that code from GPL projects such as
+PhotonCamera and Open Camera can be adapted later, with attribution, if that turns out useful.
+So far none has been: the multi-frame pipeline is written from the papers below.
 
 ## Credits
 
@@ -137,7 +171,17 @@ projects such as PhotonCamera and Open Camera, with attribution, if that turns o
   data depend. Device side only; nothing from it is in this repository.
 - **Android4Lumia950 community** (djokcho, EpicLPer, j0sh1x and others) — the Lumia 950/950 XL
   Android port this camera stack runs on.
-- References for phase 2 (studied, nothing reused yet): **eszdman** —
+- Multi-frame pipeline, from the published methods (no code reused): **Samuel W. Hasinoff et
+  al.**, "Burst photography for high dynamic range and low-light imaging on mobile cameras"
+  (SIGGRAPH Asia 2016) — pyramid tile alignment, merging against a reference frame,
+  under-exposure with digital gain; **Bartlomiej Wronski et al.**, "Handheld multi-frame
+  super-resolution" (SIGGRAPH 2019) — the idea of a per-pixel robustness weight from the local
+  difference against the noise model; **Henrique S. Malvar, Li-wei He, Ross Cutler**,
+  "High-quality linear interpolation for demosaicing of Bayer-patterned color images"
+  (ICASSP 2004) — the demosaic kernels; **Frédo Durand, Julie Dorsey**, "Fast bilateral
+  filtering for the display of high-dynamic-range images" (SIGGRAPH 2002) — base/detail local
+  tone mapping.
+- Other multi-frame projects looked at (nothing reused): **eszdman** —
   [PhotonCamera](https://github.com/eszdman/PhotonCamera) (GPL-3.0); **Timothy Brooks** —
   [hdr-plus](https://github.com/timothybrooks/hdr-plus) (Halide HDR+ implementation);
   **Mark Harman** — [Open Camera](https://opencamera.org.uk/) (GPL-3.0).

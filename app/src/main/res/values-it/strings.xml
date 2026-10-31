@@ -8,4 +8,11 @@
     <string name="permission_needed">Arco ha bisogno della fotocamera per scattare. Il microfono serve per l\'audio dei video.</string>
     <string name="permission_grant">Consenti</string>
     <string name="no_viewer">Nessuna app può aprire questo file</string>
+    <string name="settings_mf">Elaborazione multi-frame (burst RAW)</string>
+    <string name="settings_mf_frames">FOTOGRAMMI PER FOTO</string>
+    <string name="settings_auto">Auto</string>
+    <string name="settings_mf_tone">Tone mapping locale</string>
+    <string name="settings_mf_chroma">Riduzione rumore colore</string>
+    <string name="settings_mf_sharpen">Nitidezza</string>
+    <string name="settings_mf_denoise">Riduzione rumore</string>
 </resources>
